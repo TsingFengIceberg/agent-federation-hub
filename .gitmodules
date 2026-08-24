@@ -1,0 +1,33 @@
+[submodule "external/a2a"]
+	path = external/a2a
+	url = https://github.com/a2aproject/A2A.git
+[submodule "external/aamp"]
+	path = external/aamp
+	url = https://github.com/larksuite/aamp.git
+[submodule "external/agent-stack"]
+	path = external/agent-stack
+	url = https://github.com/i-am-bee/agentstack.git
+[submodule "external/routa"]
+	path = external/routa
+	url = https://github.com/phodal/routa.git
+[submodule "external/shrimpcrab"]
+	path = external/shrimpcrab
+	url = https://github.com/chenlubenren/ShrimpCrab--multi-agent-platform.git
+[submodule "external/multiagent-werewolf"]
+	path = external/multiagent-werewolf
+	url = https://github.com/kissie-77/MultiAgent-Werewolf.git
+[submodule "external/nacos"]
+	path = external/nacos
+	url = https://github.com/alibaba/nacos.git
+[submodule "external/agentgateway"]
+	path = external/agentgateway
+	url = https://github.com/agentgateway/agentgateway.git
+[submodule "external/solace-agent-mesh"]
+	path = external/solace-agent-mesh
+	url = https://github.com/SolaceLabs/solace-agent-mesh.git
+[submodule "external/bindu"]
+	path = external/bindu
+	url = https://github.com/GetBindu/Bindu.git
+[submodule "external/agentkit-samples"]
+	path = external/agentkit-samples
+	url = https://github.com/bytedance/agentkit-samples.git
