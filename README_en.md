@@ -19,17 +19,6 @@ A2A Protocol
 
 The initial boundary is to use A2A as the primary cross-agent protocol and AAMP as a mailbox-style asynchronous adapter, while LangGraph and similar frameworks handle multi-agent orchestration inside a domain. Nacos, agentgateway, Agent Stack, Solace Agent Mesh, ShrimpCrab, and other projects are research references for different layers, not a predetermined stack to assemble blindly.
 
-## My Agent Projects
-
-This repository also summarizes the Agent-related projects currently under development, covering application agents, a multi-agent harness, a business platform, and a cross-domain federation platform:
-
-| Project | Description |
-| --- | --- |
-| [Competitive Analysis Agent](https://github.com/TsingFengIceberg/competitive-analysis-agent) | A LangGraph-based competitive-intelligence collaboration system where specialized agents collect, analyze, review, and generate traceable reports. |
-| [Coquo Code](https://github.com/TsingFengIceberg/coquo-code) | A local single-user Coding Agent CLI that executes controlled workspace tools and manages resumable sessions, tasks, and teams. |
-| [Curmerce](https://github.com/TsingFengIceberg/curmerce) | A community-content and multi-mode commerce platform for interest-based consumption, with a planned agent for product and community guidance. |
-| [Agent Federation Hub](https://github.com/TsingFengIceberg/agent-federation-hub) | A planned general-purpose A2A federation platform for cross-domain and cross-organization discovery, trust, task collaboration, and asynchronous interoperability. |
-
 ## Start Here
 
 1. Read `.handoff/current.md` locally first: context, goals, open questions, and next steps.

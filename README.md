@@ -19,17 +19,6 @@ A2A Protocol
 
 初步边界是：以 A2A 作为跨 Agent 的主协议，AAMP 作为邮箱型异步协作适配器；LangGraph 等框架负责单个领域内部的多 Agent 编排。Nacos、agentgateway、Agent Stack、Solace Agent Mesh、ShrimpCrab 等项目用于研究不同层次的实现取舍，而不是直接拼接成既定技术栈。
 
-## 我的 Agent 项目
-
-这里也汇总目前正在建设的几个 Agent 相关项目，分别覆盖应用、多 Agent Harness、业务 Agent 和跨领域平台方向：
-
-| 项目 | 简介 |
-| --- | --- |
-| [Competitive Analysis Agent](https://github.com/TsingFengIceberg/competitive-analysis-agent) | 基于 LangGraph 的竞品情报协作系统，由多个专职 Agent 完成采集、分析、审查和可溯源报告生成。 |
-| [Coquo Code](https://github.com/TsingFengIceberg/coquo-code) | 面向本地单用户的 Coding Agent CLI，在受控 workspace 中执行工具、管理可恢复 Session、Task 和 Team。 |
-| [Curmerce](https://github.com/TsingFengIceberg/curmerce) | 面向兴趣消费的社区内容与多模式交易平台，并规划接入基于商品和社区经验的消费 Agent。 |
-| [Agent Federation Hub](https://github.com/TsingFengIceberg/agent-federation-hub) | 正在规划的通用跨领域、跨组织 A2A Agent 联邦平台，探索发现、信任、任务协作和异步互操作。 |
-
 ## 先读什么
 
 1. 在本地先读取 `.handoff/current.md`：本项目的背景、目标、未决问题和下一步。
