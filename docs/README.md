@@ -5,7 +5,9 @@
 | Directory | Purpose | Status |
 |---|---|---|
 | [`research/a2a-study/`](research/a2a-study/) | Complete imported A2A protocol and federation research snapshot | draft / imported |
-| `architecture/` | Product architecture derived from verified requirements | planned |
+| [`research/vendor-sources-2026/`](research/vendor-sources-2026/) | Product-specific notes on dated 2026 vendor publications relevant to federation boundaries | verified sources / draft implications |
+| [`architecture/a2a-v1-go-python-decision-gate.md`](architecture/a2a-v1-go-python-decision-gate.md) | Product architecture evidence and pending language decision gates | verified test evidence / decision pending |
+| [`architecture/opaque-agent-federation-review.md`](architecture/opaque-agent-federation-review.md) | Evidence review and product contract for opaque remote Agent federation | verified source review / draft architecture |
 | `adr/` | Committed architectural decisions | planned |
 | `specifications/` | Internal task model, APIs, and interoperability contracts | planned |
 
