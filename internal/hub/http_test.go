@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 )
@@ -28,7 +29,7 @@ func TestHTTPAgentTaskAndResumableEventFlow(t *testing.T) {
 		},
 	}
 	service := newTestService(t, store, adapter)
-	handler := (&HTTPHandler{Service: service}).Handler()
+	handler := testHTTPHandler(service, nil, 0)
 
 	response := request(t, handler, http.MethodPost, "/v1/agents", `{
 		"id":"agent-1", "cardUrl":"https://agent.example/card.json"
@@ -73,10 +74,10 @@ func TestHTTPRequiresTenantAndRejectsUnknownFields(t *testing.T) {
 	store, _ := core.OpenJournal("")
 	defer store.Close()
 	service := newTestService(t, store, &fakeAdapter{})
-	handler := (&HTTPHandler{Service: service}).Handler()
+	handler := testHTTPHandler(service, nil, 0)
 
 	response := request(t, handler, http.MethodGet, "/v1/agents", "", "", nil)
-	if response.Code != http.StatusBadRequest {
+	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("missing tenant status=%d", response.Code)
 	}
 	response = request(t, handler, http.MethodPost, "/v1/tasks", `{
@@ -106,7 +107,7 @@ func TestHTTPPushSecurityAndSizeLimit(t *testing.T) {
 	decode := func(payload []byte) (federation.Observation, error) {
 		return federation.Observation{DedupKey: string(payload), RemoteTaskID: "remote-1", State: core.TaskStateCompleted}, nil
 	}
-	handler := (&HTTPHandler{Service: service, DecodePush: decode, MaxBodyBytes: 8}).Handler()
+	handler := testHTTPHandler(service, decode, 8)
 	path := "/v1/tasks/" + task.ID + "/push?tenant=tenant-a"
 
 	response := request(t, handler, http.MethodPost, path, "done", "", map[string]string{"Authorization": "Bearer wrong"})
@@ -127,6 +128,60 @@ func TestHTTPPushSecurityAndSizeLimit(t *testing.T) {
 	}
 }
 
+func TestHTTPFollowStreamReadsOnlyCommittedEvents(t *testing.T) {
+	store, err := core.OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	task, err := store.CreateTask(context.Background(), core.Task{
+		ID: "follow-task", TenantID: "tenant-a", AgentID: "agent-1",
+		State: core.TaskStateWorking, CreatedAt: now, UpdatedAt: now,
+	}, core.Event{Type: "task.status", State: core.TaskStateWorking, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newTestService(t, store, &fakeAdapter{})
+	handler := (&HTTPHandler{
+		Service: service, Authenticator: DevelopmentAuthenticator{},
+		Authorizer: access.DefaultScopeAuthorizer(), EventPollInterval: 5 * time.Millisecond,
+	}).Handler()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _, _ = store.ApplyTask(context.Background(), task.TenantID, task.ID, "complete", func(current *core.Task) (core.Event, error) {
+			current.State = core.TaskStateCompleted
+			current.UpdatedAt = time.Now().UTC()
+			return core.Event{Type: "task.status", State: current.State, CreatedAt: current.UpdatedAt}, nil
+		})
+	}()
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.ID+"/events?after=1&follow=true", nil)
+	request.Header.Set(TenantHeader, task.TenantID)
+	request.Header.Set("Accept", "text/event-stream")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("follow stream did not finish after terminal Event")
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "id: 2\n") || !strings.Contains(body, `"state":"COMPLETED"`) {
+		t.Fatalf("follow stream did not deliver committed completion: %s", body)
+	}
+}
+
+func testHTTPHandler(service *Service, decode PushDecoder, maxBodyBytes int64) http.Handler {
+	return (&HTTPHandler{
+		Service: service, DecodePush: decode, MaxBodyBytes: maxBodyBytes,
+		Authenticator: DevelopmentAuthenticator{}, Authorizer: access.DefaultScopeAuthorizer(),
+	}).Handler()
+}
+
 func request(t *testing.T, handler http.Handler, method, path, body, tenantID string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewBufferString(body))
@@ -139,13 +194,4 @@ func request(t *testing.T, handler http.Handler, method, path, body, tenantID st
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
-}
-
-func responseBody(t *testing.T, response *http.Response) string {
-	t.Helper()
-	payload, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(payload)
 }

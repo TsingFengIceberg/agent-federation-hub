@@ -107,3 +107,81 @@ func TestTenantIsolationMasksTaskExistence(t *testing.T) {
 		t.Fatalf("cross-tenant lookup returned %v", err)
 	}
 }
+
+func TestJournalOptimisticRevisionAndMutationRollback(t *testing.T) {
+	store, err := OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	task, err := store.CreateTask(context.Background(), Task{
+		ID: "task-cas", TenantID: "tenant-a", AgentID: "agent-1",
+		State: TaskStateSubmitted, CreatedAt: now, UpdatedAt: now,
+	}, Event{Type: "task.submitted", CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, applied, err := store.ApplyTaskVersion(context.Background(), "tenant-a", task.ID, task.Revision+1, "cas", func(task *Task) (Event, error) {
+		task.State = TaskStateWorking
+		return Event{}, nil
+	})
+	if !errors.Is(err, ErrRevisionConflict) || applied {
+		t.Fatalf("stale revision applied=%v err=%v", applied, err)
+	}
+	mutationError := errors.New("mutation failed")
+	_, applied, err = store.ApplyTaskVersion(context.Background(), "tenant-a", task.ID, task.Revision, "rollback", func(task *Task) (Event, error) {
+		task.State = TaskStateFailed
+		return Event{}, mutationError
+	})
+	if !errors.Is(err, mutationError) || applied {
+		t.Fatalf("failed mutation applied=%v err=%v", applied, err)
+	}
+	current, err := store.GetTask(context.Background(), "tenant-a", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision != task.Revision || current.State != TaskStateSubmitted {
+		t.Fatalf("failed mutation changed task: %+v", current)
+	}
+}
+
+func TestJournalWorkLeaseExclusionExpiryAndRetrySchedule(t *testing.T) {
+	store, err := OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	task, err := store.CreateTask(ctx, Task{
+		ID: "task-lease", TenantID: "tenant-a", AgentID: "agent-1", RemoteTaskID: "remote-1",
+		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now,
+	}, Event{Type: "task.status", State: TaskStateWorking, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimRecoverable(ctx, "worker-a", 1, now, time.Minute)
+	if err != nil || len(first) != 1 || first[0].Task.ID != task.ID || first[0].Attempt != 1 {
+		t.Fatalf("first leases=%+v err=%v", first, err)
+	}
+	second, err := store.ClaimRecoverable(ctx, "worker-b", 1, now.Add(30*time.Second), time.Minute)
+	if err != nil || len(second) != 0 {
+		t.Fatalf("concurrent lease=%+v err=%v", second, err)
+	}
+	takenOver, err := store.ClaimRecoverable(ctx, "worker-b", 1, now.Add(61*time.Second), time.Minute)
+	if err != nil || len(takenOver) != 1 || takenOver[0].Attempt != 2 {
+		t.Fatalf("expired lease takeover=%+v err=%v", takenOver, err)
+	}
+	if err := store.ReleaseLease(ctx, takenOver[0], now.Add(5*time.Minute), false); err != nil {
+		t.Fatal(err)
+	}
+	early, err := store.ClaimRecoverable(ctx, "worker-c", 1, now.Add(4*time.Minute), time.Minute)
+	if err != nil || len(early) != 0 {
+		t.Fatalf("retry schedule ignored: leases=%+v err=%v", early, err)
+	}
+	retried, err := store.ClaimRecoverable(ctx, "worker-c", 1, now.Add(5*time.Minute), time.Minute)
+	if err != nil || len(retried) != 1 || retried[0].Attempt != 3 {
+		t.Fatalf("scheduled retry=%+v err=%v", retried, err)
+	}
+}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 )
 
 type fakeAdapter struct {
@@ -23,6 +24,7 @@ type fakeAdapter struct {
 	sendCalls      int
 	getCalls       int
 	subscribeCalls int
+	lastMessage    federation.Message
 }
 
 func (f *fakeAdapter) Discover(context.Context, string) (federation.Descriptor, error) {
@@ -35,6 +37,7 @@ func (f *fakeAdapter) Discover(context.Context, string) (federation.Descriptor, 
 
 func (f *fakeAdapter) Send(ctx context.Context, agent core.Agent, message federation.Message) iter.Seq2[federation.Observation, error] {
 	f.sendCalls++
+	f.lastMessage = message
 	if f.send != nil {
 		return f.send(ctx, agent, message)
 	}
@@ -138,6 +141,9 @@ func TestSubmitDisconnectWithKnownRemoteTaskReconcilesWithoutResend(t *testing.T
 	if adapter.sendCalls != 1 || adapter.getCalls != 1 || adapter.subscribeCalls != 1 {
 		t.Fatalf("calls: send=%d get=%d subscribe=%d", adapter.sendCalls, adapter.getCalls, adapter.subscribeCalls)
 	}
+	if !adapter.lastMessage.ReturnImmediately {
+		t.Fatal("Hub did not request immediate A2A acceptance before background reconciliation")
+	}
 }
 
 func TestSubmitDisconnectBeforeAcknowledgementIsAmbiguousAndNotResent(t *testing.T) {
@@ -228,10 +234,11 @@ func TestDuplicatePushAndTenantIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation := federation.Observation{DedupKey: "push-1", RemoteTaskID: "remote-1", State: core.TaskStateCompleted}
-	updated, err := service.AcceptPush(context.Background(), "tenant-a", task.ID, "push-secret", observation)
+	_, err = service.AcceptPush(context.Background(), "tenant-a", task.ID, "push-secret", observation)
 	if err != nil {
 		t.Fatal(err)
 	}
+	updated := processOneInboxItem(t, store, service)
 	revision := updated.Revision
 	duplicate, err := service.AcceptPush(context.Background(), "tenant-a", task.ID, "push-secret", observation)
 	if err != nil {
@@ -240,12 +247,13 @@ func TestDuplicatePushAndTenantIsolation(t *testing.T) {
 	if duplicate.Revision != revision {
 		t.Fatalf("duplicate changed revision: %d -> %d", revision, duplicate.Revision)
 	}
-	late, err := service.AcceptPush(context.Background(), "tenant-a", task.ID, "push-secret", federation.Observation{
+	_, err = service.AcceptPush(context.Background(), "tenant-a", task.ID, "push-secret", federation.Observation{
 		DedupKey: "late-working", RemoteTaskID: "remote-1", State: core.TaskStateWorking,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	late := processOneInboxItem(t, store, service)
 	if late.State != core.TaskStateCompleted {
 		t.Fatalf("late state regressed terminal task to %s", late.State)
 	}
@@ -255,6 +263,22 @@ func TestDuplicatePushAndTenantIsolation(t *testing.T) {
 	if _, err := service.AcceptPush(context.Background(), "tenant-a", task.ID, "wrong", observation); !errors.Is(err, ErrInvalidPushCredential) {
 		t.Fatalf("bad credential returned %v", err)
 	}
+}
+
+func processOneInboxItem(t *testing.T, store *core.JournalStore, service *Service) core.Task {
+	t.Helper()
+	leases, err := store.ClaimInbox(context.Background(), "test-inbox-worker", 1, time.Now().UTC(), time.Minute)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("claim inbox leases=%+v err=%v", leases, err)
+	}
+	task, err := service.ApplyInboxItem(context.Background(), leases[0].Item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AckInbox(context.Background(), leases[0]); err != nil {
+		t.Fatal(err)
+	}
+	return task
 }
 
 func TestCancellationCannotCrossTenant(t *testing.T) {
@@ -378,7 +402,7 @@ func TestCredentialEnvironmentReferenceRequiresOperatorAllowlist(t *testing.T) {
 	if _, err := service.RegisterAgent(context.Background(), "tenant-a", input); err == nil {
 		t.Fatal("unapproved credential environment reference was accepted")
 	}
-	service.AllowedCredentialEnv = map[string]struct{}{"REMOTE_AGENT_TOKEN": {}}
+	service.Secrets = secrets.NewEnvProviderForTest(map[string]string{"REMOTE_AGENT_TOKEN": "test-secret"})
 	agent, err := service.RegisterAgent(context.Background(), "tenant-a", input)
 	if err != nil {
 		t.Fatal(err)

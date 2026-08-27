@@ -4,6 +4,10 @@
 > **Date**: 2026-08-27<br>
 > **Evidence**: repository-owned deterministic tests and pinned A2A/AAMP source review
 
+The semantic rules in this ADR remain active. [ADR 0004](0004-postgresql-leased-background-execution.md)
+now supplies the accepted PostgreSQL, lease, and durable inbox implementation;
+the journal limitations below describe the original local backend.
+
 ## Context
 
 A2A Tasks remain owned by the remote provider. Streaming and Push are observation

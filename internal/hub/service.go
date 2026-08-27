@@ -5,25 +5,24 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 )
-
-var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Service struct {
 	Store                 core.Store
 	Adapter               federation.Adapter
 	PublicBaseURL         string
 	AllowPrivateAgentURLs bool
-	AllowedCredentialEnv  map[string]struct{}
+	Secrets               secrets.Provider
 	Now                   func() time.Time
 	TokenGenerator        func() (string, error)
 }
@@ -63,11 +62,11 @@ func (s *Service) RegisterAgent(ctx context.Context, tenantID string, input Regi
 		if _, ok := declared[scheme]; !ok {
 			return core.Agent{}, fmt.Errorf("credential scheme %q is not declared by the Agent Card", scheme)
 		}
-		if !envNamePattern.MatchString(envName) {
-			return core.Agent{}, fmt.Errorf("credential environment variable %q is invalid", envName)
+		if s.Secrets == nil {
+			return core.Agent{}, errors.New("secret provider is required when credentials are configured")
 		}
-		if _, ok := s.AllowedCredentialEnv[envName]; !ok {
-			return core.Agent{}, fmt.Errorf("credential environment variable %q is not allowed by Hub configuration", envName)
+		if err := s.Secrets.ValidateReference(envName); err != nil {
+			return core.Agent{}, fmt.Errorf("credential reference %q: %w", envName, err)
 		}
 		credentialEnv[scheme] = envName
 	}
@@ -146,7 +145,7 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 		return task, err
 	}
 
-	message := federation.Message{ID: task.MessageID, Text: input.Text, Push: push}
+	message := federation.Message{ID: task.MessageID, Text: input.Text, Push: push, ReturnImmediately: true}
 	var streamErr error
 	for observation, observationErr := range s.Adapter.Send(ctx, agent, message) {
 		if observationErr != nil {
@@ -289,6 +288,41 @@ func (s *Service) AcceptPush(ctx context.Context, tenantID, taskID, token string
 	got := []byte(core.DigestString(token))
 	if task.PushTokenHash == "" || subtle.ConstantTimeCompare(want, got) != 1 {
 		return core.Task{}, ErrInvalidPushCredential
+	}
+	if observation.RemoteTaskID == "" || observation.RemoteTaskID != task.RemoteTaskID {
+		return core.Task{}, ErrPushTaskMismatch
+	}
+	observation.Source = "a2a-push"
+	payload, err := json.Marshal(observation)
+	if err != nil {
+		return core.Task{}, fmt.Errorf("encode Push observation: %w", err)
+	}
+	inbox, ok := s.Store.(core.InboxStore)
+	if !ok {
+		return core.Task{}, ErrPushInboxUnavailable
+	}
+	dedupKey := observation.DedupKey
+	if dedupKey == "" {
+		dedupKey = "push:" + core.DigestJSON(observation)
+	}
+	_, err = inbox.EnqueueInbox(ctx, core.InboxItem{
+		ID: core.NewID(), TenantID: tenantID, TaskID: taskID,
+		DedupKey: dedupKey, Protocol: "a2a", Payload: payload, CreatedAt: s.now(),
+	})
+	return task, err
+}
+
+func (s *Service) ApplyInboxItem(ctx context.Context, item core.InboxItem) (core.Task, error) {
+	if item.Protocol != "a2a" {
+		return core.Task{}, fmt.Errorf("unsupported inbox protocol %q", item.Protocol)
+	}
+	var observation federation.Observation
+	if err := json.Unmarshal(item.Payload, &observation); err != nil {
+		return core.Task{}, fmt.Errorf("decode queued Push observation: %w", err)
+	}
+	task, err := s.Store.GetTask(ctx, item.TenantID, item.TaskID)
+	if err != nil {
+		return core.Task{}, err
 	}
 	if observation.RemoteTaskID == "" || observation.RemoteTaskID != task.RemoteTaskID {
 		return core.Task{}, ErrPushTaskMismatch

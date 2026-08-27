@@ -56,10 +56,12 @@ the HTTP API maps this to `?after=<sequence>` or SSE `Last-Event-ID`. Adapter
 observations carry a stable deduplication key. Replaying the same observation
 does not increment the Task revision or event sequence.
 
-The current JSON journal appends and `fsync`s each Agent or Task mutation and
-replays it on process restart. It is an initial single-process durability proof,
-not a claim of concurrent multi-node storage, compaction, backup, encryption at
-rest, or database transactions.
+The JSON journal appends and `fsync`s each Agent, Task, lease, or inbox mutation
+and replays it on process restart. It remains a single-process development
+backend. The PostgreSQL backend commits a Task revision and its Event in one
+serializable transaction, enforces unique observation keys, and coordinates
+recoverable work across instances with expiring leases. This is not yet a claim
+of operational HA, backup, compaction, or encryption-at-rest verification.
 
 ## Artifact and Part
 
@@ -82,8 +84,10 @@ this contract.
 When a stream fails after a remote Task ID was observed, the Hub does not fail
 or resend the Task. It calls `GetTask`, merges the provider snapshot, and may
 then subscribe if the Task remains non-terminal and the Agent declares
-streaming. On restart, the reconciler scans non-terminal Tasks with remote IDs
-and refreshes them through the same path.
+streaming. Background reconcilers claim non-terminal Tasks with remote IDs
+through leases, renew ownership during provider calls, and refresh them through
+the same path. Failures receive a bounded retry schedule, and expired leases can
+be taken over by another instance.
 
 Cancellation first records `cancelRequested=true`, then invokes the provider.
 Only an observed provider state changes the Task to `CANCELED`; a transport error
@@ -92,20 +96,28 @@ leaves cancellation unconfirmed and records a sanitized Problem.
 ## Tenant and Credential Rules
 
 All Agent, Task, Event, cancellation, reconciliation, and Push lookups are
-tenant-scoped. Cross-tenant reads return the same not-found result as absent
-resources. Registered Agents persist security-scheme-to-environment-variable
-references only, and the referenced variable name must be present in the
-operator-configured Hub allowlist. Credential values are loaded for a call and
-are not written to the Task, Event, Artifact, journal, or HTTP response.
+tenant-scoped. Management routes take that tenant from an authenticated
+Principal, not a caller-controlled header in JWT mode. Cross-tenant reads return
+the same not-found result as absent resources. Registered Agents persist only
+SecretProvider references, and the initial environment provider requires each
+reference in an operator allowlist. Credential values are loaded for a call and
+are not written to the Task, Event, Artifact, journal, database, or HTTP response.
+
+Push callbacks are durably and idempotently enqueued before HTTP success. A
+leased background processor applies the normalized observation and acknowledges
+the inbox item only after the Task/Event mutation commits.
 
 ## Verified Scenarios
 
-Local deterministic tests currently verify journal replay, ordered cursors,
+Local deterministic tests currently verify journal replay, ordered and followed cursors,
 duplicate suppression, forced stream failure with and without a remote Task ID,
 restart reconciliation, late-state protection, exact A2A version selection,
-declared credential requirements, sanitized error categories, tenant isolation,
-Push token and payload controls, and AAMP lifecycle mapping.
+declared credential requirements, JWT and scope failures, audit redaction,
+sanitized error categories, tenant isolation, Push token/payload/inbox controls,
+leases and worker heartbeat, and AAMP lifecycle mapping. PostgreSQL 17 integration
+tests add transaction rollback and real two-connection-pool exclusion evidence.
 
 See [`internal/core/store_test.go`](../../internal/core/store_test.go),
-[`internal/hub/service_test.go`](../../internal/hub/service_test.go), and
-[`internal/hub/http_test.go`](../../internal/hub/http_test.go).
+[`internal/hub/service_test.go`](../../internal/hub/service_test.go),
+[`internal/hub/http_test.go`](../../internal/hub/http_test.go), and
+[`tests/postgres/run-integration.sh`](../../tests/postgres/run-integration.sh).

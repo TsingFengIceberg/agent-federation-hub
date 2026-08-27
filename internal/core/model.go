@@ -118,6 +118,30 @@ type Task struct {
 	LastSequence         uint64        `json:"lastSequence"`
 }
 
+type WorkLease struct {
+	Task      Task      `json:"task"`
+	Owner     string    `json:"owner"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	Attempt   uint32    `json:"attempt"`
+}
+
+type InboxItem struct {
+	ID        string          `json:"id"`
+	TenantID  string          `json:"tenantId"`
+	TaskID    string          `json:"taskId"`
+	DedupKey  string          `json:"dedupKey"`
+	Protocol  string          `json:"protocol"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
+type InboxLease struct {
+	Item      InboxItem `json:"item"`
+	Owner     string    `json:"owner"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	Attempt   uint32    `json:"attempt"`
+}
+
 type Event struct {
 	ID         string     `json:"id"`
 	DedupKey   string     `json:"dedupKey"`

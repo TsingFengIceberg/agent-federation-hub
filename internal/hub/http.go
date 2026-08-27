@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,32 +9,78 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 )
 
-const TenantHeader = "X-AFH-Tenant-ID"
-
 type PushDecoder func([]byte) (federation.Observation, error)
 
 type HTTPHandler struct {
-	Service      *Service
-	DecodePush   PushDecoder
-	MaxBodyBytes int64
+	Service           *Service
+	DecodePush        PushDecoder
+	MaxBodyBytes      int64
+	Authenticator     Authenticator
+	Authorizer        access.Authorizer
+	Audit             access.AuditSink
+	Now               func() time.Time
+	EventPollInterval time.Duration
 }
 
 func (h *HTTPHandler) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/agents", h.registerAgent)
-	mux.HandleFunc("GET /v1/agents", h.listAgents)
-	mux.HandleFunc("POST /v1/tasks", h.submitTask)
-	mux.HandleFunc("GET /v1/tasks/{taskID}", h.getTask)
-	mux.HandleFunc("GET /v1/tasks/{taskID}/events", h.getEvents)
-	mux.HandleFunc("POST /v1/tasks/{taskID}/cancel", h.cancelTask)
-	mux.HandleFunc("POST /v1/tasks/{taskID}/reconcile", h.reconcileTask)
+	mux.HandleFunc("POST /v1/agents", h.protected(access.ActionAgentRegister, h.registerAgent))
+	mux.HandleFunc("GET /v1/agents", h.protected(access.ActionAgentList, h.listAgents))
+	mux.HandleFunc("POST /v1/tasks", h.protected(access.ActionTaskSubmit, h.submitTask))
+	mux.HandleFunc("GET /v1/tasks/{taskID}", h.protected(access.ActionTaskRead, h.getTask))
+	mux.HandleFunc("GET /v1/tasks/{taskID}/events", h.protected(access.ActionTaskEvents, h.getEvents))
+	mux.HandleFunc("POST /v1/tasks/{taskID}/cancel", h.protected(access.ActionTaskCancel, h.cancelTask))
+	mux.HandleFunc("POST /v1/tasks/{taskID}/reconcile", h.protected(access.ActionTaskReconcile, h.reconcileTask))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/push", h.push)
 	return mux
+}
+
+func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if requestID == "" {
+			requestID = core.NewID()
+		}
+		w.Header().Set("X-Request-ID", requestID)
+		if h.Authenticator == nil || h.Authorizer == nil {
+			h.audit(r.Context(), access.AuditRecord{RequestID: requestID, Decision: "configuration_error", Action: action})
+			writeProblem(w, http.StatusInternalServerError, "internal", "ACCESS_CONTROL_NOT_CONFIGURED", "Hub access control is not configured")
+			return
+		}
+		principal, err := h.Authenticator.Authenticate(r.Context(), r)
+		if err != nil {
+			h.audit(r.Context(), access.AuditRecord{RequestID: requestID, Decision: "authentication_denied", Action: action, Reason: "invalid_or_missing_credential"})
+			writeProblem(w, http.StatusUnauthorized, "authentication", "UNAUTHENTICATED", "valid authentication is required")
+			return
+		}
+		audit := access.AuditRecord{
+			RequestID: requestID, Decision: "authentication_allowed", Action: action,
+			Subject: principal.Subject, TenantID: principal.TenantID,
+			Issuer: principal.Issuer, AuthMethod: principal.AuthMethod,
+		}
+		h.audit(r.Context(), audit)
+		resourceID := r.PathValue("taskID")
+		if err := h.Authorizer.Authorize(r.Context(), principal, access.Request{Action: action, ResourceID: resourceID}); err != nil {
+			audit.Decision = "authorization_denied"
+			audit.ResourceID = resourceID
+			audit.Reason = "insufficient_scope_or_policy"
+			h.audit(r.Context(), audit)
+			writeProblem(w, http.StatusForbidden, "authorization", "FORBIDDEN", "the authenticated principal cannot perform this operation")
+			return
+		}
+		audit.Decision = "authorization_allowed"
+		audit.ResourceID = resourceID
+		h.audit(r.Context(), audit)
+		ctx := access.WithPrincipal(r.Context(), principal)
+		next(w, r.WithContext(ctx))
+	}
 }
 
 func (h *HTTPHandler) registerAgent(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +122,9 @@ func (h *HTTPHandler) submitTask(w http.ResponseWriter, r *http.Request) {
 	if !h.decodeJSON(w, r, &input) {
 		return
 	}
+	if input.EnablePush && !h.requireAdditionalAuthorization(w, r, access.ActionPushConfigure) {
+		return
+	}
 	task, err := h.Service.SubmitTask(r.Context(), tenantID, input)
 	if err != nil {
 		h.writeError(w, err)
@@ -114,25 +164,50 @@ func (h *HTTPHandler) getEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		after = parsed
 	}
-	events, err := h.Service.EventsAfter(r.Context(), tenantID, r.PathValue("taskID"), after)
+	taskID := r.PathValue("taskID")
+	events, err := h.Service.EventsAfter(r.Context(), tenantID, taskID, after)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+	streaming := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+	if !streaming {
 		writeJSON(w, http.StatusOK, events)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	for _, event := range events {
-		encoded, err := json.Marshal(event)
-		if err != nil {
+	w.WriteHeader(http.StatusOK)
+	follow := r.URL.Query().Get("follow") == "true"
+	for {
+		for _, event := range events {
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				return
+			}
+			_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.Type, encoded)
+			after = event.Sequence
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if !follow {
 			return
 		}
-		_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.Type, encoded)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
+		task, err := h.Service.GetTask(r.Context(), tenantID, taskID)
+		if err != nil || (task.State.Terminal() && after >= task.LastSequence) {
+			return
+		}
+		timer := time.NewTimer(h.eventPollInterval())
+		select {
+		case <-r.Context().Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		events, err = h.Service.EventsAfter(r.Context(), tenantID, taskID, after)
+		if err != nil {
+			return
 		}
 	}
 }
@@ -221,6 +296,32 @@ func (h *HTTPHandler) maxBodyBytes() int64 {
 	return 1 << 20
 }
 
+func (h *HTTPHandler) eventPollInterval() time.Duration {
+	if h.EventPollInterval > 0 {
+		return h.EventPollInterval
+	}
+	return 250 * time.Millisecond
+}
+
+func (h *HTTPHandler) requireAdditionalAuthorization(w http.ResponseWriter, r *http.Request, action access.Action) bool {
+	principal, ok := access.PrincipalFromContext(r.Context())
+	if !ok || h.Authorizer.Authorize(r.Context(), principal, access.Request{Action: action}) != nil {
+		h.audit(r.Context(), access.AuditRecord{
+			Timestamp: h.now(), RequestID: w.Header().Get("X-Request-ID"), Decision: "authorization_denied",
+			Action: action, Subject: principal.Subject, TenantID: principal.TenantID,
+			Issuer: principal.Issuer, AuthMethod: principal.AuthMethod, Reason: "insufficient_scope_or_policy",
+		})
+		writeProblem(w, http.StatusForbidden, "authorization", "FORBIDDEN", "the authenticated principal cannot perform this operation")
+		return false
+	}
+	h.audit(r.Context(), access.AuditRecord{
+		Timestamp: h.now(), RequestID: w.Header().Get("X-Request-ID"), Decision: "authorization_allowed",
+		Action: action, Subject: principal.Subject, TenantID: principal.TenantID,
+		Issuer: principal.Issuer, AuthMethod: principal.AuthMethod,
+	})
+	return true
+}
+
 func (h *HTTPHandler) writeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	category, code, message := "internal", "HUB_OPERATION_FAILED", "Hub operation failed"
@@ -255,12 +356,30 @@ func (h *HTTPHandler) writeError(w http.ResponseWriter, err error) {
 }
 
 func requireTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
-	tenantID := strings.TrimSpace(r.Header.Get(TenantHeader))
-	if tenantID == "" {
-		writeProblem(w, http.StatusBadRequest, "validation", "TENANT_REQUIRED", TenantHeader+" is required")
+	principal, ok := access.PrincipalFromContext(r.Context())
+	if !ok || principal.TenantID == "" {
+		writeProblem(w, http.StatusUnauthorized, "authentication", "UNAUTHENTICATED", "authenticated tenant identity is required")
 		return "", false
 	}
-	return tenantID, true
+	return principal.TenantID, true
+}
+
+func (h *HTTPHandler) audit(ctx context.Context, record access.AuditRecord) {
+	if record.Timestamp.IsZero() {
+		record.Timestamp = h.now()
+	}
+	sink := h.Audit
+	if sink == nil {
+		sink = access.NopAuditSink{}
+	}
+	_ = sink.Record(ctx, record)
+}
+
+func (h *HTTPHandler) now() time.Time {
+	if h.Now != nil {
+		return h.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func writeProblem(w http.ResponseWriter, status int, category, code, message string) {

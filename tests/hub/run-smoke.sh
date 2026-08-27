@@ -36,6 +36,7 @@ agent_pid=$!
 "$hub_bin" \
   -listen "127.0.0.1:$hub_port" \
   -journal "$run_dir/hub.journal" \
+  -auth-mode development \
   -allow-private-agent-urls \
   -reconcile-interval 0 \
   >"$run_dir/hub.log" 2>&1 &

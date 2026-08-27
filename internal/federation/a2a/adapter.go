@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
-	"os"
 	"sort"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
@@ -22,11 +22,16 @@ import (
 type Adapter struct {
 	resolver        *agentcard.Resolver
 	transportClient *http.Client
+	secrets         secrets.Provider
 }
 
-func New(timeout time.Duration) *Adapter {
+func New(timeout time.Duration, providers ...secrets.Provider) *Adapter {
 	client := &http.Client{Timeout: timeout}
-	return &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client}
+	adapter := &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client}
+	if len(providers) > 0 {
+		adapter.secrets = providers[0]
+	}
+	return adapter
 }
 
 func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Descriptor, error) {
@@ -85,11 +90,21 @@ func (a *Adapter) client(ctx context.Context, agent core.Agent) (*a2aclient.Clie
 
 	credentials := a2aclient.NewInMemoryCredentialsStore()
 	sessionID := a2aclient.SessionID(agent.ID)
-	for scheme, envName := range agent.CredentialEnv {
-		value := os.Getenv(envName)
-		if value != "" {
-			credentials.Set(sessionID, a2a.SecuritySchemeName(scheme), a2aclient.AuthCredential(value))
+	for scheme, reference := range agent.CredentialEnv {
+		if a.secrets == nil {
+			return nil, ctx, &federation.Error{Problem: core.Problem{
+				Category: "authentication", Code: "SECRET_PROVIDER_REQUIRED",
+				Message: "remote Agent credential provider is not configured",
+			}}
 		}
+		value, err := a.secrets.Resolve(ctx, reference)
+		if err != nil {
+			return nil, ctx, &federation.Error{Problem: core.Problem{
+				Category: "authentication", Code: "CREDENTIAL_UNAVAILABLE",
+				Message: "remote Agent credential is unavailable",
+			}, Cause: err}
+		}
+		credentials.Set(sessionID, a2a.SecuritySchemeName(scheme), a2aclient.AuthCredential(value))
 	}
 	if err := validateCredentials(ctx, card, credentials, sessionID); err != nil {
 		return nil, ctx, err

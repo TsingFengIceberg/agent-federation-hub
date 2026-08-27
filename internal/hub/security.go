@@ -11,6 +11,7 @@ import (
 var (
 	ErrInvalidPushCredential = errors.New("invalid Push credential")
 	ErrPushTaskMismatch      = errors.New("Push task does not match callback task")
+	ErrPushInboxUnavailable  = errors.New("durable Push inbox is unavailable")
 )
 
 func validateHTTPURL(raw string, publicOnly bool) error {

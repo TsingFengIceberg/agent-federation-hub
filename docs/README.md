@@ -11,6 +11,9 @@
 | [`architecture/phase-one-hub-conformance-boundary.md`](architecture/phase-one-hub-conformance-boundary.md) | Executable Hub slice and explicit production/conformance gaps | implemented initial slice / gaps explicit |
 | [`adr/0001-a2a-v1-jsonrpc-sse-profile.md`](adr/0001-a2a-v1-jsonrpc-sse-profile.md) | Initial A2A v1 external wire profile and explicit deferrals | accepted / implementation coverage partial |
 | [`adr/0002-durable-federation-task-reconciliation.md`](adr/0002-durable-federation-task-reconciliation.md) | Durable observable-state and ambiguous-delivery recovery rules | accepted for initial slice |
+| [`adr/0003-authenticated-principal-and-policy-boundary.md`](adr/0003-authenticated-principal-and-policy-boundary.md) | Authenticated Principal, policy, audit, and SecretProvider boundary | accepted / implemented initial boundary |
+| [`adr/0004-postgresql-leased-background-execution.md`](adr/0004-postgresql-leased-background-execution.md) | PostgreSQL transactions, multi-instance leases, and durable Push inbox | accepted / PostgreSQL 17 integration-tested |
 | [`specifications/task-event-artifact-contract.md`](specifications/task-event-artifact-contract.md) | Implemented normalized Task, Event, Artifact, tenancy, and recovery contract | verified local implementation |
+| [`specifications/access-control-contract.md`](specifications/access-control-contract.md) | Principal fields and management API Action-to-scope mapping | implemented initial contract |
 
 The imported research snapshot records its source repository and commit. General protocol corrections belong in the source study repository first; Agent Federation Hub product decisions and implementation contracts belong here.

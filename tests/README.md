@@ -1,6 +1,6 @@
 # Test system
 
-> **Evidence status**: deterministic layers verified locally; live-provider
+> **Evidence status**: deterministic and PostgreSQL 17 integration layers verified locally; live-provider
 > layer verified once on 2026-08-27 with local user-supplied configuration
 
 The repository separates tests by the evidence they provide:
@@ -8,7 +8,8 @@ The repository separates tests by the evidence they provide:
 | Layer | Entry point | External API | Purpose |
 |---|---|---|---|
 | Unit | [`run-unit.sh`](run-unit.sh) | no | Go invariants plus live-adapter configuration and parsing tests |
-| Hub contract | `go test ./internal/core ./internal/federation/... ./internal/hub` | no | Durable state, recovery, duplicate, auth, tenancy, Push, HTTP, and adapter boundaries |
+| Hub contract | `go test ./internal/...` | no | Durable state, JWT/policy/audit, recovery, leases, inbox, tenancy, Push, HTTP, and adapter boundaries |
+| PostgreSQL integration | [`postgres/run-integration.sh`](postgres/run-integration.sh) | local Docker | Real transactions, rollback, two-pool leases, expiry takeover, and durable inbox exclusion |
 | Hub service smoke | [`hub/run-smoke.sh`](hub/run-smoke.sh) | no | Real Hub HTTP registration, A2A Task/Artifact exchange, and SSE replay against the Go fixture |
 | A2A interoperability | [`interop/run-smoke.sh`](interop/run-smoke.sh) | no | Go Hub probe against independent Go and Python A2A Agents |
 | Provider-adapter mock | [`real-api/run-mock-smoke.sh`](real-api/run-mock-smoke.sh) | no | Full A2A-to-provider path against a local compatible SSE endpoint |
@@ -25,6 +26,13 @@ Run all deterministic repository-owned tests with:
 
 ```bash
 GO_BIN=/path/to/go tests/run-deterministic.sh
+```
+
+The PostgreSQL layer is opt-in within the aggregate script because it requires
+Docker and the pinned `postgres:17-alpine` image:
+
+```bash
+AFH_RUN_POSTGRES_TESTS=1 GO_BIN=/path/to/go tests/run-deterministic.sh
 ```
 
 ## Configuration boundary

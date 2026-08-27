@@ -1,7 +1,7 @@
 # Phase-One Hub and Conformance Boundary
 
 > **Status**: implemented initial slice / production gaps explicit<br>
-> **Updated**: 2026-08-27<br>
+> **Updated**: 2026-08-28<br>
 > **Evidence**: repository-owned tests, pinned upstream source, and previously recorded local interoperability runs
 
 ## Implemented Slice
@@ -21,28 +21,31 @@ POST /v1/tasks/{id}/push
 ```
 
 Registration resolves an Agent Card and accepts only the selected A2A `1.0`
-JSON-RPC interface. Calls use environment-variable credential references. Task
+JSON-RPC interface. Calls use SecretProvider references whose first provider is
+an operator-allowlisted environment backend. Task
 submission consumes A2A SSE observations, persists normalized events and
 Artifacts, and follows the recovery rules in [ADR 0002](../adr/0002-durable-federation-task-reconciliation.md).
 
-The event endpoint returns JSON or a finite SSE replay. `after` and
-`Last-Event-ID` resume after a durable cursor. Continuous client fan-out and
-backpressure are not implemented yet; periodic provider reconciliation remains
-independent of an HTTP client connection.
+The event endpoint returns JSON, finite SSE replay, or a continuous committed
+Event stream with `follow=true`. `after` and `Last-Event-ID` resume after a
+durable cursor. The first fan-out implementation polls the Store and has no
+explicit backpressure policy; it remains independent of the process that
+accepted the original Task.
 
 ## Boundary Matrix
 
 | Area | Current executable evidence | Not yet claimed |
 |---|---|---|
 | A2A profile | Exact `1.0` JSON-RPC selection, SDK `v2.5.0`, SSE mapping | HTTP+JSON, gRPC, extensions, signed/extended Card policy |
-| Durability | Append, `fsync`, replay, restart reconciliation | Multi-process safety, database transactionality, HA, backup, compaction |
+| Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event transactions, revisions, and real two-pool lease tests | Managed database qualification, HA, backup/restore, compaction/retention |
 | Recovery | Known-ID disconnect uses `GetTask`; unknown-ID send becomes ambiguous | Automated ambiguous-operation resolution or exactly-once execution |
-| Authentication | Card-declared single-scheme credential loaded from an operator-allowlisted environment reference | OAuth refresh, mTLS, compound AND requirements, delegated identity |
-| Tenancy | Tenant-scoped Agent/Task/Event/cancel/reconcile/Push with masked lookup | Authenticated tenant principal, RBAC/ABAC, quotas, encryption keys |
-| Push receiver | Per-Task random Bearer secret hash, constant-time check, task/tenant match, size limit, dedup | Rate limiting, replay timestamp/signature, DNS-rebinding defense, queue/dead letter, HA ingress |
+| Authentication | JWT issuer/audience/signature/time validation, Principal context, scope policy, audit, and SecretProvider; separate callback token | Dynamic OIDC/JWKS, OAuth refresh/exchange, mTLS, compound outbound requirements, revocation |
+| Tenancy | Authenticated Principal supplies tenant for every management lookup; forged JWT-mode tenant header is ignored | ABAC policy administration, quotas, tenant encryption keys, cross-organization trust federation |
+| Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack | Rate limiting, replay timestamp/signature, DNS-rebinding defense, dead-letter policy, HA ingress load test |
 | Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics | URI retrieval, malware scanning, object storage, retention and content policy |
 | Errors | Sanitized transport/auth/authz/validation/resource/state/protocol categories | Complete binding-specific status equivalence and tenant policy details |
 | Registry | Durable built-in Agent Card registration by URL | Nacos/ARD adapter, Card signature verification, refresh and health policy |
+| Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance | Priority, preemption, operator pause/drain, dead-letter administration |
 | Gateway | Direct A2A calls behind the federation Adapter interface | Managed agentgateway route, policy routing, rate limiting, egress controls |
 | AAMP | AAMP 1.1 lifecycle/result/attachment mapper into the common model | SMTP/JMAP client, discovery, sender policy, pairing, mailbox credentials |
 
@@ -62,14 +65,18 @@ With the pinned Go dependencies available:
 ```bash
 go run ./cmd/federation-hub \
   -listen 127.0.0.1:8080 \
+  -storage journal \
   -journal var/hub.journal \
+  -auth-mode development \
   -credential-env-allowlist REMOTE_AGENT_TOKEN
 ```
 
-Every control-plane request requires `X-AFH-Tenant-ID`. The header is only a
-tenant-scoping input in this slice; an authenticated ingress must establish and
-overwrite it before production use. `-allow-private-agent-urls` exists only for
-local fixtures. Push additionally requires a public HTTPS base URL.
+Development mode uses `X-AFH-Tenant-ID`, grants wildcard scope, and logs a
+warning; it is only for local fixtures. JWT mode requires issuer, audience, key
+ID, and a PEM public-key file, then derives tenant identity and scopes from the
+validated token. PostgreSQL mode reads its DSN from the configured environment
+variable. `-allow-private-agent-urls` exists only for local fixtures. Push
+additionally requires a public HTTPS base URL.
 
 ## TCK Alignment
 

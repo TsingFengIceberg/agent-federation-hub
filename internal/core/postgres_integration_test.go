@@ -1,0 +1,161 @@
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
+	dataSourceName := os.Getenv("AFH_TEST_POSTGRES_DSN")
+	if dataSourceName == "" {
+		t.Skip("AFH_TEST_POSTGRES_DSN is not configured")
+	}
+	ctx := context.Background()
+	first, err := OpenPostgres(ctx, dataSourceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := OpenPostgres(ctx, dataSourceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err := first.pool.Exec(ctx, `TRUNCATE afh_events, afh_tasks, afh_agents CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	if err := first.PutAgent(ctx, Agent{
+		ID: "agent-1", TenantID: "tenant-a", Name: "remote",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := first.CreateTask(ctx, Task{
+		ID: "task-1", TenantID: "tenant-a", AgentID: "agent-1", RemoteTaskID: "remote-1",
+		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now,
+	}, Event{Type: "task.status", State: TaskStateWorking, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mutationError := errors.New("rollback requested")
+	_, applied, err := first.ApplyTaskVersion(ctx, task.TenantID, task.ID, task.Revision, "rollback", func(task *Task) (Event, error) {
+		task.State = TaskStateFailed
+		return Event{Type: "task.status", CreatedAt: now}, mutationError
+	})
+	if !errors.Is(err, mutationError) || applied {
+		t.Fatalf("rollback mutation applied=%v err=%v", applied, err)
+	}
+	current, err := second.GetTask(ctx, task.TenantID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision != task.Revision || current.State != TaskStateWorking {
+		t.Fatalf("rolled back Task changed: %+v", current)
+	}
+	if _, applied, err := first.ApplyTaskVersion(ctx, task.TenantID, task.ID, task.Revision+1, "stale", func(task *Task) (Event, error) {
+		return Event{Type: "task.status", CreatedAt: now}, nil
+	}); !errors.Is(err, ErrRevisionConflict) || applied {
+		t.Fatalf("stale PostgreSQL revision applied=%v err=%v", applied, err)
+	}
+	updated, applied, err := first.ApplyTaskVersion(ctx, task.TenantID, task.ID, task.Revision, "observation-1", func(task *Task) (Event, error) {
+		task.UpdatedAt = now.Add(time.Second)
+		return Event{Type: "task.status", State: task.State, CreatedAt: task.UpdatedAt}, nil
+	})
+	if err != nil || !applied {
+		t.Fatalf("PostgreSQL mutation applied=%v err=%v", applied, err)
+	}
+	duplicate, applied, err := second.ApplyTask(ctx, task.TenantID, task.ID, "observation-1", func(task *Task) (Event, error) {
+		return Event{Type: "must-not-apply", CreatedAt: now}, nil
+	})
+	if err != nil || applied || duplicate.Revision != updated.Revision {
+		t.Fatalf("PostgreSQL duplicate=%+v applied=%v err=%v", duplicate, applied, err)
+	}
+	events, err := second.EventsAfter(ctx, task.TenantID, task.ID, 0)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("rolled back Event persisted: events=%+v err=%v", events, err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan []WorkLease, 2)
+	errorsOut := make(chan error, 2)
+	var wait sync.WaitGroup
+	for index, store := range []*PostgresStore{first, second} {
+		wait.Add(1)
+		go func(index int, store *PostgresStore) {
+			defer wait.Done()
+			<-start
+			leases, err := store.ClaimRecoverable(ctx, []string{"worker-a", "worker-b"}[index], 1, now, time.Minute)
+			results <- leases
+			errorsOut <- err
+		}(index, store)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	close(errorsOut)
+	claimed := 0
+	var lease WorkLease
+	for leases := range results {
+		claimed += len(leases)
+		if len(leases) == 1 {
+			lease = leases[0]
+		}
+	}
+	for err := range errorsOut {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("multi-instance lease claims=%d, want 1", claimed)
+	}
+
+	takenOver, err := second.ClaimRecoverable(ctx, "worker-c", 1, now.Add(time.Minute+time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(takenOver) != 1 || takenOver[0].Task.ID != lease.Task.ID || takenOver[0].Attempt != 2 {
+		t.Fatalf("expired lease takeover=%+v", takenOver)
+	}
+	if err := first.ReleaseLease(ctx, lease, now, true); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("stale owner release error=%v", err)
+	}
+
+	item := InboxItem{
+		ID: "inbox-1", TenantID: task.TenantID, TaskID: task.ID,
+		DedupKey: "push-1", Protocol: "a2a", Payload: json.RawMessage(`{"state":"COMPLETED"}`), CreatedAt: now,
+	}
+	created, err := first.EnqueueInbox(ctx, item)
+	if err != nil || !created {
+		t.Fatalf("enqueue created=%v err=%v", created, err)
+	}
+	created, err = second.EnqueueInbox(ctx, InboxItem{
+		ID: "inbox-duplicate", TenantID: task.TenantID, TaskID: task.ID,
+		DedupKey: item.DedupKey, Protocol: item.Protocol, Payload: item.Payload, CreatedAt: now,
+	})
+	if err != nil || created {
+		t.Fatalf("duplicate inbox created=%v err=%v", created, err)
+	}
+	inboxA, err := first.ClaimInbox(ctx, "inbox-worker-a", 1, now, time.Minute)
+	if err != nil || len(inboxA) != 1 {
+		t.Fatalf("first inbox claim=%+v err=%v", inboxA, err)
+	}
+	inboxB, err := second.ClaimInbox(ctx, "inbox-worker-b", 1, now, time.Minute)
+	if err != nil || len(inboxB) != 0 {
+		t.Fatalf("duplicate inbox claim=%+v err=%v", inboxB, err)
+	}
+	if err := second.AckInbox(ctx, inboxA[0]); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := first.ClaimInbox(ctx, "inbox-worker-c", 1, now.Add(2*time.Minute), time.Minute); err != nil || len(pending) != 0 {
+		t.Fatalf("acked inbox redelivered=%+v err=%v", pending, err)
+	}
+}
