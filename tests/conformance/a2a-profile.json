@@ -8,5 +8,10 @@
   "evaluatedTCKCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
   "evaluatedTCKProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
   "repositoryContractStatus": "verified-local",
-  "externalTCKStatus": "unresolved-revision-skew"
+  "externalTCKStatus": "unresolved-revision-skew",
+  "ownedSUT": "cmd/a2a-tck-sut",
+  "ownedSUTProfile": "JSONRPC+SSE",
+  "ownedSUTStatus": "implemented",
+  "waiverFile": "tck-waivers.json",
+  "runner": "run-tck.sh"
 }

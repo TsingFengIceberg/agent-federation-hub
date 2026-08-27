@@ -32,3 +32,4 @@ export AFH_TEST_POSTGRES_DSN="postgres://postgres:${password}@127.0.0.1:${port}/
 
 cd "$repo_root"
 "$go_bin" test -count=1 ./internal/core -run TestPostgresTransactionalStoreAndMultiInstanceLeases
+"$go_bin" test -count=1 ./internal/access -run TestPostgresRateLimiterCoordinatesAcrossPools

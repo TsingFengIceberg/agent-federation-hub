@@ -48,11 +48,12 @@ restart-replayed in the development journal.
   an operator-provided client CA and workload mapping.
 - The implementation does not operate an identity provider, CA, policy authoring
   system, consent service, or credential vault.
-- Local process-scoped rate limiting and a `0600` JSONL audit sink are implemented
-  and exercised by an opt-in TLS integration test. Real partner IdP/CA/PDP
-  interoperability, distributed rate limiting, durable audit export/rotation,
-  automated certificate rollover, and outage drills remain gates before a
-  production trust claim.
+- Local process-scoped and PostgreSQL-coordinated rate limiting, plus a `0600`
+  JSONL audit sink and optional HTTPS central exporter, are implemented and
+  exercised by unit, PostgreSQL, and opt-in TLS integration tests. Real partner
+  IdP/CA/PDP interoperability, managed-database qualification, durable audit
+  export/rotation, automated certificate rollover, and outage drills remain
+  gates before a production trust claim.
 
 ## Evidence
 

@@ -68,7 +68,10 @@ func main() {
 	allowPrivateArtifactURIs := flag.Bool("allow-private-artifact-urls", false, "allow private HTTPS Artifact source URLs for local development")
 	rateLimitPerMinute := flag.Int("rate-limit-per-minute", 0, "authenticated requests per minute per tenant/subject/action; required outside development")
 	rateLimitBurst := flag.Int("rate-limit-burst", 0, "initial burst for the authenticated request limiter")
+	rateLimitBackend := flag.String("rate-limit-backend", "process", "rate-limit backend: process or postgres")
 	auditFile := flag.String("audit-file", "", "0600 JSONL audit file with fsync; required outside development")
+	auditURL := flag.String("audit-url", "", "optional HTTPS central audit collector endpoint")
+	auditTokenReference := flag.String("audit-token-ref", "", "optional SecretProvider reference for the central audit collector")
 	flag.Parse()
 
 	store, err := openStore(context.Background(), *storageBackend, *journalPath, *postgresDSNEnv)
@@ -104,21 +107,50 @@ func main() {
 	if *authMode != "development" && (!*artifactRequireClean || *artifactScanner == "none") {
 		log.Fatal("non-development authentication requires --artifact-require-clean and a configured malware scanner")
 	}
-	limiter := access.NewTokenBucketLimiter(*rateLimitPerMinute, *rateLimitBurst)
-	if *authMode != "development" && limiter == nil {
-		log.Fatal("non-development authentication requires --rate-limit-per-minute")
+	limiter, closeLimiter, limiterErr := buildRateLimiter(context.Background(), *rateLimitBackend, *rateLimitPerMinute, *rateLimitBurst, os.Getenv(*postgresDSNEnv))
+	if limiterErr != nil {
+		log.Fatal(limiterErr)
 	}
-	var auditSink access.AuditSink = access.NewJSONAuditSink(os.Stderr)
+	if closeLimiter != nil {
+		defer closeLimiter()
+	}
+	if *authMode != "development" && (limiter == nil || *rateLimitBackend != "postgres") {
+		log.Fatal("non-development authentication requires --rate-limit-backend=postgres and --rate-limit-per-minute")
+	}
+	var auditSinks []access.AuditSink
 	if *auditFile != "" {
 		durableAudit, auditErr := access.OpenFileAuditSink(*auditFile)
 		if auditErr != nil {
 			log.Fatal(auditErr)
 		}
 		defer durableAudit.Close()
-		auditSink = durableAudit
+		auditSinks = append(auditSinks, durableAudit)
+	}
+	if *auditTokenReference != "" && *auditURL == "" {
+		log.Fatal("--audit-token-ref requires --audit-url")
+	}
+	if *auditURL != "" {
+		if err := baseSecretProvider.ValidateReference(*auditTokenReference); err != nil && *auditTokenReference != "" {
+			log.Fatalf("audit token reference: %v", err)
+		}
+		var bearer func(context.Context) (string, error)
+		if *auditTokenReference != "" {
+			bearer = func(ctx context.Context) (string, error) {
+				return secretProvider.Resolve(ctx, *auditTokenReference)
+			}
+		}
+		centralAudit, auditErr := access.NewHTTPAuditSink(*auditURL, bearer)
+		if auditErr != nil {
+			log.Fatal(auditErr)
+		}
+		auditSinks = append(auditSinks, centralAudit)
 	}
 	if *authMode != "development" && *auditFile == "" {
 		log.Fatal("non-development authentication requires --audit-file")
+	}
+	var auditSink access.AuditSink = access.NewJSONAuditSink(os.Stderr)
+	if len(auditSinks) > 0 {
+		auditSink = access.FanoutAuditSink(auditSinks)
 	}
 	adapter := a2afederation.New(*remoteTimeout, secretProvider)
 	service := &hub.Service{
@@ -222,6 +254,21 @@ func main() {
 	}
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		log.Fatal(serveErr)
+	}
+}
+
+func buildRateLimiter(ctx context.Context, backend string, perMinute, burst int, postgresDSN string) (access.RateLimiter, func(), error) {
+	switch backend {
+	case "process":
+		return access.NewTokenBucketLimiter(perMinute, burst), nil, nil
+	case "postgres":
+		limiter, err := access.OpenPostgresRateLimiter(ctx, postgresDSN, perMinute, burst)
+		if err != nil {
+			return nil, nil, err
+		}
+		return limiter, limiter.Close, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported rate-limit backend %q", backend)
 	}
 }
 

@@ -1,8 +1,8 @@
 # A2A v1 Go/Python decision gate
 
-> **Test date**: 2026-08-26<br>
+> **Test date**: 2026-08-28<br>
 > **Evidence status**: verified local execution / decision pending<br>
-> **Scope**: official A2A SDK and tooling behavior; no Hub implementation exists yet
+> **Scope**: official A2A SDK/tooling behavior plus the repository-owned JSON-RPC/SSE TCK fixture and Hub contract evidence
 
 ## Decision question
 
@@ -34,7 +34,7 @@ The local toolchain was Go `1.25.0`, Python `3.13.9`, uv `0.12.3`, and Protobuf 
 | Python `0.3` compatibility line | pass | ITK Python `0.3` <-> Python `1.0` scenario passed over JSON-RPC and gRPC; this does not establish every cross-language legacy pairing |
 | Go SDK tests | pass | `go test ./...` passed at the tested Go SDK revision |
 | Inspector v1 AgentCard check | pass, limited | Live Go SUT AgentCard produced no Inspector validation errors; Inspector validator tests passed `49/49` |
-| TCK JSON-RPC MUST tests | fail / unresolved | Pytest summary: `55 passed, 17 failed, 163 skipped, 30 deselected` |
+| TCK JSON-RPC MUST tests against the repository-owned SUT | evidence with waivers | Fixed TCK `5996b79f`: `73 passed, 8 failed, 154 skipped, 30 deselected`; report is written by [`tests/conformance/run-tck.sh`](../../tests/conformance/run-tck.sh) |
 | TCK gRPC MUST tests | fail / unresolved | After the fixture workaround below: `43 passed, 12 failed, 180 skipped, 30 deselected` |
 | TCK HTTP+JSON MUST tests | not run | The Go SDK TCK SUT has an explicit `TODO` instead of serving the REST Binding |
 
@@ -46,7 +46,7 @@ The raw failure counts must not be treated as 29 independent Go SDK defects. Thr
 
 ### Go TCK fixture gaps
 
-The tested Go SUT executor always creates a Task, advances through `SUBMITTED -> WORKING -> COMPLETED`, and emits no Artifact. It does not implement the current TCK Gherkin behaviors for direct Message responses, Artifact variants, or `INPUT_REQUIRED`. Its task store also has no authenticated test principal, so all `ListTasks` checks fail before pagination or filtering is exercised. These failures show that the official Go TCK integration is stale relative to the current TCK scenario contract; they do not by themselves show that the underlying SDK cannot implement the behavior.
+The repository-owned SUT now covers deterministic direct Message, Task, text/raw/URL/data Artifact, chunked SSE, `INPUT_REQUIRED`, cancellation, resubscription delay, rejection, and explicit version rejection scenarios. The remaining failures are recorded rather than hidden: terminal/missing-task subscription semantics, history-length filtering, one File URL expectation, and one malformed-content error mapping still need alignment with the selected protocol contract. The external TCK itself remains pinned to an older embedded protocol commit, so these results are evidence with explicit waivers, not a conformance claim.
 
 The Go SUT also advertises its gRPC interface as `http://localhost:9998`, while the current TCK passes the complete value directly to `grpc.insecure_channel`. The valid gRPC run used a temporary fixture-only change to advertise `localhost:9998`, matching the Go SDK's own compatibility tests. Results from the first DNS-failing run were excluded.
 
@@ -84,6 +84,11 @@ The language decision remains pending until a repository-owned minimal SUT:
 3. runs Go Server/Python Client and Python Server/Go Client contract tests;
 4. passes applicable current-spec MUST checks with every skip and waiver explained;
 5. records build size, startup, concurrency, persistence integration, observability, and developer-effort evidence in an ADR.
+
+The current owned-SUT TCK report is intentionally non-zero. Before promoting the
+language decision, align the TCK embedded protocol commit with the selected
+source, close or explain each remaining MUST failure, and keep the waiver file
+machine-checked.
 
 For the first owned implementation, JSON-RPC plus SSE is the best-evidenced initial profile because ITK covered unary, streaming, Push, and resubscription on that path. HTTP+JSON should follow once the owned SUT can run its TCK surface; gRPC remains a required interoperability profile but should not be the only initial external Binding.
 

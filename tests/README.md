@@ -17,7 +17,7 @@ The repository separates tests by the evidence they provide:
 | Provider-adapter mock | [`real-api/run-mock-smoke.sh`](real-api/run-mock-smoke.sh) | no | Full A2A-to-provider path against a local compatible SSE endpoint |
 | Live provider | [`real-api/run-smoke.sh`](real-api/run-smoke.sh) | yes | End-to-end A2A Task and SSE behavior around a real model call |
 | Conformance pins | [`conformance/`](conformance/) | no | Machine-checked protocol/SDK/TCK revision and evidence status |
-| Inspector/TCK | unresolved revision alignment | no | Future aligned protocol conformance and explained waivers |
+| Inspector/TCK | [`conformance/run-tck.sh`](conformance/run-tck.sh) | local TCK checkout | Repository-owned JSON-RPC/SSE SUT evidence with machine-readable waivers; current fixed TCK run is non-zero and not full conformance |
 
 The deterministic layers are the regression baseline and must not depend on
 network availability, provider quotas, model output wording, or paid APIs. The
@@ -70,3 +70,18 @@ The first live adapter targets the OpenAI Responses API wire shape documented
 in the [official API reference](https://developers.openai.com/api/reference/resources/responses/methods/create/).
 This is a replaceable test adapter, not a decision that the Hub depends on
 OpenAI or on that provider protocol.
+
+Run the owned TCK fixture against an existing checkout without cloning or
+modifying upstream sources:
+
+```bash
+A2A_TCK_DIR=/path/to/a2a-tck \
+A2A_TCK_PYTHON=/path/to/a2a-tck/.venv/bin/python \
+GO_BIN=/path/to/go \
+tests/conformance/run-tck.sh
+```
+
+The command writes `var/tck/owned-sut-result.json` and preserves the TCK exit
+code. Read [`tck-waivers.json`](conformance/tck-waivers.json) together with the
+report; a non-zero exit code is expected until protocol revisions and the
+remaining MUST behaviors are aligned.

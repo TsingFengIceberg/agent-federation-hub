@@ -1,0 +1,25 @@
+{
+  "status": "unresolved-revision-skew",
+  "tckCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
+  "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
+  "waivers": [
+    {
+      "id": "REVISION-SKEW",
+      "scope": "all",
+      "reason": "The pinned TCK embeds an older A2A specification snapshot than the repository-selected protocol source; binding error mappings differ.",
+      "evidence": "docs/architecture/a2a-v1-go-python-decision-gate.md"
+    },
+    {
+      "id": "SUT-AUTH",
+      "scope": "authentication",
+      "reason": "The repository-owned SUT uses an explicit deterministic test principal and does not claim production OAuth/OIDC behavior.",
+      "evidence": "docs/adr/0005-federated-workload-trust.md"
+    },
+    {
+      "id": "SUT-PUSH",
+      "scope": "push-notifications",
+      "reason": "Push receiver and durable inbox behavior are tested on the Hub boundary; this protocol fixture does not advertise a remote Push sender.",
+      "evidence": "docs/specifications/task-event-artifact-contract.md"
+    }
+  ]
+}

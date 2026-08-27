@@ -36,13 +36,13 @@ accepted the original Task.
 
 | Area | Current executable evidence | Not yet claimed |
 |---|---|---|
-| A2A profile | Exact `1.0` JSON-RPC selection, SDK `v2.5.0`, SSE mapping | HTTP+JSON, gRPC, extensions, signed/extended Card policy |
+| A2A profile | Exact `1.0` JSON-RPC selection, SDK `v2.5.0`, SSE mapping, repository-owned deterministic TCK SUT | HTTP+JSON, gRPC, extensions, signed/extended Card policy |
 | Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event transactions, revisions, and real two-pool lease tests | Managed database qualification, HA, backup/restore, compaction/retention |
 | Recovery | Known-ID disconnect uses `GetTask`; unknown-ID send becomes ambiguous | Automated ambiguous-operation resolution or exactly-once execution |
-| Authentication | JWT issuer/audience/signature/time validation, Principal context, scope policy, audit, and SecretProvider; separate callback token | Dynamic OIDC/JWKS, OAuth refresh/exchange, mTLS, compound outbound requirements, revocation |
+| Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, and audit | Real partner trust-service integration, automated rollover, consent, centralized retention, and outage qualification |
 | Tenancy | Authenticated Principal supplies tenant for every management lookup; forged JWT-mode tenant header is ignored | ABAC policy administration, quotas, tenant encryption keys, cross-organization trust federation |
-| Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack | Rate limiting, replay timestamp/signature, DNS-rebinding defense, dead-letter policy, HA ingress load test |
-| Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics | URI retrieval, malware scanning, object storage, retention and content policy |
+| Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack, HTTPS/DNS/IP policy, authenticated rate limiting and audit | Replay timestamp/signature, dead-letter policy, HA ingress load test |
+| Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics; filesystem/S3 object storage, MIME/size/quota controls, ClamAV quarantine, authenticated retrieval, expiry leases | Encryption policy, DLP/legal hold, backup/restore, production throughput |
 | Errors | Sanitized transport/auth/authz/validation/resource/state/protocol categories | Complete binding-specific status equivalence and tenant policy details |
 | Registry | Durable built-in Agent Card registration by URL | Nacos/ARD adapter, Card signature verification, refresh and health policy |
 | Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance | Priority, preemption, operator pause/drain, dead-letter administration |
@@ -85,13 +85,12 @@ records the selected protocol source, SDK, Binding, and the exact TCK revision
 previously evaluated. A deterministic Go test verifies that these pins and their
 evidence status do not drift silently.
 
-The external TCK remains `unresolved-revision-skew`, not passed. Its evaluated
-revision pins an older A2A protocol source, and the available Go SUT lacks
-Message-only, Artifact, `INPUT_REQUIRED`, ListTasks principal, and HTTP+JSON
-behavior required by its scenarios. Repository-owned tests cover many of these
-behaviors for the selected JSON-RPC/SSE slice, but cannot be counted as a TCK
-waiver. Full conformance requires selecting an aligned TCK revision, running the
-owned server as its SUT, and explaining every remaining skip or failure.
+The external TCK remains `unresolved-revision-skew`, not passed. The
+repository-owned JSON-RPC/SSE SUT run at the pinned TCK revision recorded 73
+passed, 8 failed, and 154 skipped scenarios. Remaining failures and the
+authentication/Push/revision waivers are machine-recorded; full conformance
+requires an aligned TCK and closure or explanation of every remaining MUST
+failure.
 
 ## Registry and Gateway Replaceability
 

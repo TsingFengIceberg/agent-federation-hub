@@ -1,10 +1,15 @@
 package access
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,5 +48,69 @@ func TestFileAuditSinkPersistsAndRestrictsRecords(t *testing.T) {
 	}
 	if decoded.RequestID != record.RequestID || decoded.TenantID != record.TenantID {
 		t.Fatalf("decoded=%+v", decoded)
+	}
+}
+
+func TestHTTPAuditSinkUsesHTTPSAndBearerCallback(t *testing.T) {
+	var body bytes.Buffer
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Authorization"); got != "Bearer collector-token" {
+			t.Fatalf("authorization=%q", got)
+		}
+		_, _ = body.ReadFrom(r.Body)
+		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header), Request: r}, nil
+	})}
+	sink, err := NewHTTPAuditSink("https://collector.example/audit", func(context.Context) (string, error) {
+		return "collector-token", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink.Client = client
+	if err := sink.Record(context.Background(), AuditRecord{RequestID: "request-1", Decision: "allowed"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.String(), "request-1") {
+		t.Fatalf("collector body=%s", body.String())
+	}
+}
+
+func TestHTTPAuditSinkRejectsNonHTTPSAndCollectorFailure(t *testing.T) {
+	if _, err := NewHTTPAuditSink("http://collector.example/audit", nil); err == nil {
+		t.Fatal("non-HTTPS audit endpoint accepted")
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("down")), Header: make(http.Header), Request: r}, nil
+	})}
+	sink, err := NewHTTPAuditSink("https://collector.example/audit", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink.Client = client
+	if err := sink.Record(context.Background(), AuditRecord{RequestID: "request-2"}); err == nil {
+		t.Fatal("collector outage was accepted")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func TestFanoutAuditSinkRetainsLocalRecordWhenCollectorFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	local, err := OpenFileAuditSink(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	collectorErr := errors.New("collector unavailable")
+	fanout := FanoutAuditSink{local, AuditSinkFunc(func(context.Context, AuditRecord) error { return collectorErr })}
+	if err := fanout.Record(context.Background(), AuditRecord{RequestID: "request-3"}); !errors.Is(err, collectorErr) {
+		t.Fatalf("fanout error=%v", err)
+	}
+	if content, err := os.ReadFile(path); err != nil || !strings.Contains(string(content), "request-3") {
+		t.Fatalf("local record content=%s err=%v", content, err)
 	}
 }

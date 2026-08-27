@@ -59,11 +59,16 @@ contain decision metadata but exclude credentials and payloads.
   resource, and scopes while exposing only SecretProvider references to adapters.
 - OIDC requires `jti`; tenant/issuer/token revocations persist in the journal or
   PostgreSQL and authentication fails if revocation state is unavailable.
-- An optional process-local token bucket is keyed by tenant, subject, and action;
-  rejected requests return `429` with `Retry-After`. Deployments needing a
-  shared budget must provide a distributed implementation of the same interface.
+- Token buckets are keyed by tenant, subject, and action; the process-local
+  implementation is suitable for development, while the PostgreSQL
+  implementation uses serializable transactions and row locks so independent
+  Hub instances share one budget. Rejected requests return `429` with
+  `Retry-After`; coordination-store failure fails closed.
 - Audit records can be written to an append-only `0600` JSONL file with an
-  `fsync` per record. This is a local durability boundary, not a central SIEM.
+  `fsync` per record and optionally fanned out to an HTTPS collector using a
+  SecretProvider-resolved bearer token. Local persistence remains the recovery
+  boundary when the collector is unavailable; this is not yet a central SIEM
+  qualification.
 
 ## Current Gates
 
