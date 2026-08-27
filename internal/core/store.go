@@ -85,6 +85,14 @@ type DurableStore interface {
 	OutboxStore
 }
 
+// HealthStore exposes a bounded dependency check for readiness probes. A
+// successful health check means the store can accept and durably process new
+// work; it is intentionally separate from Store so in-memory test doubles do
+// not need to implement infrastructure-specific behavior.
+type HealthStore interface {
+	Health(context.Context) error
+}
+
 type leaseState struct {
 	Owner       string    `json:"owner"`
 	ExpiresAt   time.Time `json:"expiresAt"`
@@ -1281,6 +1289,21 @@ func (s *JournalStore) EventsAfter(_ context.Context, tenantID, id string, after
 		}
 	}
 	return result, nil
+}
+
+func (s *JournalStore) Health(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.file == nil {
+		return nil
+	}
+	if _, err := s.file.Stat(); err != nil {
+		return fmt.Errorf("stat journal: %w", err)
+	}
+	return nil
 }
 
 func (s *JournalStore) Close() error {

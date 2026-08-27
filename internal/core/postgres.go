@@ -1099,6 +1099,16 @@ func (s *PostgresStore) Close() error {
 	return nil
 }
 
+func (s *PostgresStore) Health(ctx context.Context) error {
+	if s == nil || s.pool == nil {
+		return errors.New("PostgreSQL store is not initialized")
+	}
+	if err := s.pool.Ping(ctx); err != nil {
+		return fmt.Errorf("ping PostgreSQL: %w", err)
+	}
+	return nil
+}
+
 type taskRows interface {
 	Next() bool
 	Scan(...any) error

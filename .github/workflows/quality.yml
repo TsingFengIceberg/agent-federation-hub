@@ -1,0 +1,68 @@
+name: quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Check formatting
+        run: test -z "$(find . -path './submodules' -prune -o -name '*.go' -print | xargs gofmt -l)"
+      - name: Unit tests
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Race tests
+        run: go test -race ./internal/...
+
+  a2a-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Verify protocol and SDK pins
+        run: tests/conformance/check-pins.sh
+      - name: Validate conformance metadata
+        run: go test ./tests/conformance
+
+  a2a-tck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v4
+        with:
+          repository: a2aproject/a2a-tck
+          ref: 5996b79f9cefa6fc390980e383e358a66fb9e49e
+          path: a2a-tck
+      - name: Install pinned TCK
+        run: uv sync --locked --project a2a-tck
+      - name: Run JSON-RPC and HTTP+JSON MUST matrix
+        env:
+          A2A_TCK_DIR: ${{ github.workspace }}/a2a-tck
+          A2A_TCK_PYTHON: ${{ github.workspace }}/a2a-tck/.venv/bin/python
+          A2A_TCK_REQUIRE_PIN: '1'
+          A2A_TCK_REPORT_ROOT: ${{ github.workspace }}/var/tck
+          GO_BIN: go
+        run: tests/conformance/run-matrix.sh

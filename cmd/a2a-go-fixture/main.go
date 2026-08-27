@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/interop"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	"github.com/TsingFengIceberg/agent-federation-hub/internal/interop"
 )
 
 func main() {

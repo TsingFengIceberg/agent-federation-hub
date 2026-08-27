@@ -49,6 +49,16 @@ tests/postgres/run-backup-restore.sh
 This is a restore-path smoke test, not a substitute for encrypted managed
 backups, retention policy, point-in-time recovery, or disaster-recovery drills.
 
+The PostgreSQL restart recovery smoke keeps a sentinel row across a database
+process restart:
+
+```bash
+tests/postgres/run-restart-recovery.sh
+```
+
+It validates persistence and reconnect readiness in the reference image; it is
+not a primary/standby failover or managed-service qualification.
+
 The MinIO layer is independently opt-in and uses a pinned disposable image:
 
 ```bash

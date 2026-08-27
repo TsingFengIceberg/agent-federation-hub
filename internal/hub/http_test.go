@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -230,6 +231,30 @@ func TestHTTPRateLimitReturnsRetryAfterAndAuditsDecision(t *testing.T) {
 	second := request(t, handler, http.MethodGet, "/v1/agents", "", "tenant-a", nil)
 	if first.Code != http.StatusOK || second.Code != http.StatusTooManyRequests || second.Header().Get("Retry-After") == "" {
 		t.Fatalf("first=%d second=%d retry-after=%q", first.Code, second.Code, second.Header().Get("Retry-After"))
+	}
+}
+
+func TestHTTPHealthAndReadinessProbes(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	service := newTestService(t, store, &fakeAdapter{})
+	readyErr := errors.New("database unavailable")
+	ready := func(context.Context) error { return readyErr }
+	handler := (&HTTPHandler{Service: service, Readiness: ready}).Handler()
+
+	response := request(t, handler, http.MethodGet, "/healthz", "", "", nil)
+	if response.Code != http.StatusOK || response.Body.String() != "ok\n" {
+		t.Fatalf("health response=%d %q", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/readyz", "", "", nil)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), readyErr.Error()) {
+		t.Fatalf("unready response=%d %q", response.Code, response.Body.String())
+	}
+	ready = func(context.Context) error { return nil }
+	handler = (&HTTPHandler{Service: service, Readiness: ready}).Handler()
+	response = request(t, handler, http.MethodGet, "/readyz", "", "", nil)
+	if response.Code != http.StatusOK || response.Body.String() != "ready\n" {
+		t.Fatalf("ready response=%d %q", response.Code, response.Body.String())
 	}
 }
 

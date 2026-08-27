@@ -31,6 +31,8 @@ type HTTPHandler struct {
 	Now               func() time.Time
 	EventPollInterval time.Duration
 	Metrics           func() string
+	Readiness         func(context.Context) error
+	ReadinessTimeout  time.Duration
 }
 
 func (h *HTTPHandler) Handler() http.Handler {
@@ -39,6 +41,27 @@ func (h *HTTPHandler) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if h.Readiness == nil {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			_, _ = io.WriteString(w, "ready\n")
+			return
+		}
+		timeout := h.ReadinessTimeout
+		if timeout <= 0 {
+			timeout = 2 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		if err := h.Readiness(ctx); err != nil {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, "not ready: %s\n", err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = io.WriteString(w, "ready\n")
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")

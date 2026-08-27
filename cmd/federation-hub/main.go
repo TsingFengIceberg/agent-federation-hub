@@ -215,10 +215,18 @@ func main() {
 	if (*tlsCertificateFile == "") != (*tlsKeyFile == "") {
 		log.Fatal("TLS certificate and key files must be configured together")
 	}
+	readiness := func(ctx context.Context) error {
+		healthStore, ok := store.(core.HealthStore)
+		if !ok {
+			return errors.New("configured store does not expose a health check")
+		}
+		return healthStore.Health(ctx)
+	}
 	handler := (&hub.HTTPHandler{
 		Service: service, DecodePush: a2afederation.DecodePush,
 		Authenticator: authenticator, Authorizer: authorizer,
 		Audit: auditSink, Limiter: limiter, Metrics: outboxMetrics.Prometheus,
+		Readiness: readiness,
 	}).Handler()
 	server := &http.Server{
 		Addr: *listen, Handler: handler,

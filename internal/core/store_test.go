@@ -29,6 +29,25 @@ func TestJournalPermissionsAreRestricted(t *testing.T) {
 	}
 }
 
+func TestJournalHealthHonorsContextAndFileState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.journal")
+	store, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Health(context.Background()); err != nil {
+		t.Fatalf("healthy journal: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.Health(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled journal health=%v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestJournalReplayAndDuplicateSuppression(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.journal")
 	ctx := context.Background()
