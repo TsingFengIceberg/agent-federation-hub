@@ -98,6 +98,32 @@ func TestHTTPAuthorizationAndAuditRedactCredentials(t *testing.T) {
 	}
 }
 
+func TestJWTAuthenticatorRejectsDurablyRevokedToken(t *testing.T) {
+	verifier, privateKey, now := newTestJWTAuthenticator(t)
+	store, err := core.OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.RevokeToken(context.Background(), core.TokenRevocation{
+		Issuer: verifier.Issuer, TokenID: "revoked-token", TenantID: "tenant-a",
+		RevokedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	verifier.Revocations = store
+	verifier.RequireTokenID = true
+	token := signTestJWT(t, privateKey, now, jwt.MapClaims{
+		"iss": verifier.Issuer, "aud": verifier.Audience, "sub": "user-1",
+		"tenant_id": "tenant-a", "scope": "tasks:read", "jti": "revoked-token",
+	})
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	if _, err := verifier.Authenticate(context.Background(), request); err == nil {
+		t.Fatal("revoked token accepted")
+	}
+}
+
 func newTestJWTAuthenticator(t *testing.T) (*JWTAuthenticator, ed25519.PrivateKey, time.Time) {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)

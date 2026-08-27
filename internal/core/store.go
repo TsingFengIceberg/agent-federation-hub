@@ -18,6 +18,7 @@ var (
 	ErrConflict         = errors.New("resource already exists")
 	ErrRevisionConflict = errors.New("resource revision changed")
 	ErrLeaseLost        = errors.New("work lease is no longer owned")
+	ErrQuotaExceeded    = errors.New("tenant artifact quota exceeded")
 )
 
 type Store interface {
@@ -48,6 +49,24 @@ type InboxStore interface {
 	RetryInbox(context.Context, InboxLease, time.Time) error
 }
 
+type RevocationStore interface {
+	RevokeToken(context.Context, TokenRevocation) error
+	TokenRevoked(context.Context, string, string, string, time.Time) (bool, error)
+	PruneRevocations(context.Context, time.Time) (int64, error)
+}
+
+type ArtifactMetadataStore interface {
+	ReserveArtifact(context.Context, ArtifactObject, ArtifactQuota) (ArtifactObject, bool, error)
+	FinalizeArtifact(context.Context, string, string, string, string, ArtifactScanStatus, ArtifactObjectStatus, time.Time) (ArtifactObject, error)
+	FailArtifact(context.Context, string, string, string, time.Time) (ArtifactObject, error)
+	GetArtifact(context.Context, string, string) (ArtifactObject, error)
+	GetArtifactUsage(context.Context, string) (ArtifactUsage, error)
+	ClaimExpiredArtifacts(context.Context, string, int, time.Time, time.Duration) ([]ArtifactDeletionLease, error)
+	RenewArtifactLease(context.Context, ArtifactDeletionLease, time.Time, time.Duration) (ArtifactDeletionLease, error)
+	CompleteArtifactDeletion(context.Context, ArtifactDeletionLease, time.Time) error
+	RetryArtifactDeletion(context.Context, ArtifactDeletionLease, time.Time) error
+}
+
 type DurableStore interface {
 	LeasedStore
 	InboxStore
@@ -68,42 +87,62 @@ type inboxState struct {
 	Acked       bool      `json:"acked"`
 }
 
+type artifactLeaseState struct {
+	Owner       string    `json:"owner"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	AvailableAt time.Time `json:"availableAt"`
+	Attempt     uint32    `json:"attempt"`
+}
+
 type journalRecord struct {
-	Version    int         `json:"version"`
-	Kind       string      `json:"kind"`
-	Agent      *Agent      `json:"agent,omitempty"`
-	Task       *Task       `json:"task,omitempty"`
-	Event      *Event      `json:"event,omitempty"`
-	TaskKey    string      `json:"taskKey,omitempty"`
-	Lease      *leaseState `json:"lease,omitempty"`
-	Inbox      *InboxItem  `json:"inbox,omitempty"`
-	InboxID    string      `json:"inboxId,omitempty"`
-	InboxState *inboxState `json:"inboxState,omitempty"`
+	Version         int                 `json:"version"`
+	Kind            string              `json:"kind"`
+	Agent           *Agent              `json:"agent,omitempty"`
+	Task            *Task               `json:"task,omitempty"`
+	Event           *Event              `json:"event,omitempty"`
+	TaskKey         string              `json:"taskKey,omitempty"`
+	Lease           *leaseState         `json:"lease,omitempty"`
+	Inbox           *InboxItem          `json:"inbox,omitempty"`
+	InboxID         string              `json:"inboxId,omitempty"`
+	InboxState      *inboxState         `json:"inboxState,omitempty"`
+	Revocation      *TokenRevocation    `json:"revocation,omitempty"`
+	ArtifactObject  *ArtifactObject     `json:"artifactObject,omitempty"`
+	ArtifactUsage   *ArtifactUsage      `json:"artifactUsage,omitempty"`
+	ArtifactLeaseID string              `json:"artifactLeaseId,omitempty"`
+	ArtifactLease   *artifactLeaseState `json:"artifactLease,omitempty"`
 }
 
 type JournalStore struct {
-	mu          sync.RWMutex
-	file        *os.File
-	agents      map[string]Agent
-	tasks       map[string]Task
-	events      map[string][]Event
-	dedupKeys   map[string]map[string]struct{}
-	leases      map[string]leaseState
-	inbox       map[string]InboxItem
-	inboxDedup  map[string]string
-	inboxStates map[string]inboxState
+	mu              sync.RWMutex
+	file            *os.File
+	agents          map[string]Agent
+	tasks           map[string]Task
+	events          map[string][]Event
+	dedupKeys       map[string]map[string]struct{}
+	leases          map[string]leaseState
+	inbox           map[string]InboxItem
+	inboxDedup      map[string]string
+	inboxStates     map[string]inboxState
+	revocations     map[string]TokenRevocation
+	artifactObjects map[string]ArtifactObject
+	artifactUsage   map[string]ArtifactUsage
+	artifactLeases  map[string]artifactLeaseState
 }
 
 func OpenJournal(path string) (*JournalStore, error) {
 	store := &JournalStore{
-		agents:      make(map[string]Agent),
-		tasks:       make(map[string]Task),
-		events:      make(map[string][]Event),
-		dedupKeys:   make(map[string]map[string]struct{}),
-		leases:      make(map[string]leaseState),
-		inbox:       make(map[string]InboxItem),
-		inboxDedup:  make(map[string]string),
-		inboxStates: make(map[string]inboxState),
+		agents:          make(map[string]Agent),
+		tasks:           make(map[string]Task),
+		events:          make(map[string][]Event),
+		dedupKeys:       make(map[string]map[string]struct{}),
+		leases:          make(map[string]leaseState),
+		inbox:           make(map[string]InboxItem),
+		inboxDedup:      make(map[string]string),
+		inboxStates:     make(map[string]inboxState),
+		revocations:     make(map[string]TokenRevocation),
+		artifactObjects: make(map[string]ArtifactObject),
+		artifactUsage:   make(map[string]ArtifactUsage),
+		artifactLeases:  make(map[string]artifactLeaseState),
 	}
 	if path == "" {
 		return store, nil
@@ -187,6 +226,24 @@ func (s *JournalStore) applyRecord(record journalRecord) {
 	case "inbox_state":
 		if record.InboxID != "" && record.InboxState != nil {
 			s.inboxStates[record.InboxID] = *record.InboxState
+		}
+	case "revocation":
+		if record.Revocation != nil {
+			s.revocations[revocationKey(record.Revocation.Issuer, record.Revocation.TokenID, record.Revocation.TenantID)] = *record.Revocation
+		}
+	case "artifact":
+		if record.ArtifactObject != nil {
+			s.artifactObjects[resourceKey(record.ArtifactObject.TenantID, record.ArtifactObject.ID)] = *record.ArtifactObject
+		}
+		if record.ArtifactUsage != nil {
+			s.artifactUsage[record.ArtifactUsage.TenantID] = *record.ArtifactUsage
+		}
+		if record.ArtifactLeaseID != "" && record.ArtifactLease != nil {
+			s.artifactLeases[record.ArtifactLeaseID] = *record.ArtifactLease
+		}
+	case "artifact_lease":
+		if record.ArtifactLeaseID != "" && record.ArtifactLease != nil {
+			s.artifactLeases[record.ArtifactLeaseID] = *record.ArtifactLease
 		}
 	}
 }
@@ -568,6 +625,325 @@ func (s *JournalStore) RetryInbox(_ context.Context, lease InboxLease, available
 	state.ExpiresAt = time.Time{}
 	state.AvailableAt = availableAt
 	record := journalRecord{Version: 1, Kind: "inbox_state", InboxID: lease.Item.ID, InboxState: &state}
+	if err := s.append(record); err != nil {
+		return err
+	}
+	s.applyRecord(record)
+	return nil
+}
+
+func revocationKey(issuer, tokenID, tenantID string) string {
+	return issuer + "\x00" + tokenID + "\x00" + tenantID
+}
+
+func (s *JournalStore) RevokeToken(_ context.Context, revocation TokenRevocation) error {
+	if revocation.Issuer == "" || revocation.TokenID == "" || revocation.TenantID == "" ||
+		revocation.RevokedAt.IsZero() || revocation.ExpiresAt.IsZero() {
+		return errors.New("revocation issuer, token ID, tenant, revoked time, and expiry are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := journalRecord{Version: 1, Kind: "revocation", Revocation: &revocation}
+	if err := s.append(record); err != nil {
+		return err
+	}
+	s.applyRecord(record)
+	return nil
+}
+
+func (s *JournalStore) TokenRevoked(
+	_ context.Context,
+	issuer string,
+	tokenID string,
+	tenantID string,
+	now time.Time,
+) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	revocation, ok := s.revocations[revocationKey(issuer, tokenID, tenantID)]
+	return ok && now.Before(revocation.ExpiresAt), nil
+}
+
+func (s *JournalStore) PruneRevocations(_ context.Context, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var removed int64
+	for key, revocation := range s.revocations {
+		if !now.Before(revocation.ExpiresAt) {
+			delete(s.revocations, key)
+			removed++
+		}
+	}
+	// Journal compaction remains separate; expired decisions no longer affect
+	// authentication even though their historical records remain append-only.
+	return removed, nil
+}
+
+func validateArtifactReservation(object ArtifactObject) error {
+	if object.ID == "" || object.TenantID == "" || object.TaskID == "" || object.ArtifactID == "" ||
+		object.SHA256 == "" || object.SizeBytes < 0 || object.ExpiresAt.IsZero() {
+		return errors.New("artifact ID, tenant, Task, Artifact, digest, non-negative size, and expiry are required")
+	}
+	return nil
+}
+
+func sameArtifactIdentity(first, second ArtifactObject) bool {
+	return first.TenantID == second.TenantID && first.TaskID == second.TaskID &&
+		first.ArtifactID == second.ArtifactID && first.PartIndex == second.PartIndex &&
+		first.SHA256 == second.SHA256 && first.SizeBytes == second.SizeBytes
+}
+
+func (s *JournalStore) ReserveArtifact(
+	_ context.Context,
+	object ArtifactObject,
+	quota ArtifactQuota,
+) (ArtifactObject, bool, error) {
+	if err := validateArtifactReservation(object); err != nil {
+		return ArtifactObject{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := resourceKey(object.TenantID, object.ID)
+	if existing, ok := s.artifactObjects[key]; ok {
+		if !sameArtifactIdentity(existing, object) {
+			return ArtifactObject{}, false, ErrConflict
+		}
+		if existing.Status != ArtifactObjectFailed {
+			return existing, false, nil
+		}
+	}
+	usage := s.artifactUsage[object.TenantID]
+	usage.TenantID = object.TenantID
+	if (quota.MaxBytes > 0 && usage.Bytes+object.SizeBytes > quota.MaxBytes) ||
+		(quota.MaxObjects > 0 && usage.Objects+1 > quota.MaxObjects) {
+		return ArtifactObject{}, false, ErrQuotaExceeded
+	}
+	object.Status = ArtifactObjectPending
+	object.ScanStatus = ArtifactScanNotScanned
+	object.StorageKey = ""
+	object.FailureCode = ""
+	object.DeletedAt = nil
+	usage.Bytes += object.SizeBytes
+	usage.Objects++
+	record := journalRecord{Version: 1, Kind: "artifact", ArtifactObject: &object, ArtifactUsage: &usage}
+	if err := s.append(record); err != nil {
+		return ArtifactObject{}, false, err
+	}
+	s.applyRecord(record)
+	return object, true, nil
+}
+
+func (s *JournalStore) FinalizeArtifact(
+	_ context.Context,
+	tenantID, id, storageKey, detectedMediaType string,
+	scanStatus ArtifactScanStatus,
+	status ArtifactObjectStatus,
+	now time.Time,
+) (ArtifactObject, error) {
+	if storageKey == "" || (status != ArtifactObjectAvailable && status != ArtifactObjectQuarantined) {
+		return ArtifactObject{}, errors.New("storage key and a final available or quarantined status are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := resourceKey(tenantID, id)
+	object, ok := s.artifactObjects[key]
+	if !ok {
+		return ArtifactObject{}, ErrNotFound
+	}
+	if object.Status != ArtifactObjectPending {
+		if object.Status == status && object.StorageKey == storageKey {
+			return object, nil
+		}
+		return ArtifactObject{}, ErrConflict
+	}
+	object.StorageKey = storageKey
+	object.DetectedMediaType = detectedMediaType
+	object.ScanStatus = scanStatus
+	object.Status = status
+	object.UpdatedAt = now
+	record := journalRecord{Version: 1, Kind: "artifact", ArtifactObject: &object}
+	if err := s.append(record); err != nil {
+		return ArtifactObject{}, err
+	}
+	s.applyRecord(record)
+	return object, nil
+}
+
+func (s *JournalStore) FailArtifact(
+	_ context.Context,
+	tenantID, id, failureCode string,
+	now time.Time,
+) (ArtifactObject, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := resourceKey(tenantID, id)
+	object, ok := s.artifactObjects[key]
+	if !ok {
+		return ArtifactObject{}, ErrNotFound
+	}
+	if object.Status == ArtifactObjectFailed {
+		return object, nil
+	}
+	if object.Status != ArtifactObjectPending {
+		return ArtifactObject{}, ErrConflict
+	}
+	usage := s.artifactUsage[tenantID]
+	usage.Bytes -= object.SizeBytes
+	usage.Objects--
+	if usage.Bytes < 0 || usage.Objects < 0 {
+		return ArtifactObject{}, errors.New("artifact usage invariant violated")
+	}
+	object.Status = ArtifactObjectFailed
+	object.FailureCode = failureCode
+	object.UpdatedAt = now
+	record := journalRecord{Version: 1, Kind: "artifact", ArtifactObject: &object, ArtifactUsage: &usage}
+	if err := s.append(record); err != nil {
+		return ArtifactObject{}, err
+	}
+	s.applyRecord(record)
+	return object, nil
+}
+
+func (s *JournalStore) GetArtifact(_ context.Context, tenantID, id string) (ArtifactObject, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	object, ok := s.artifactObjects[resourceKey(tenantID, id)]
+	if !ok {
+		return ArtifactObject{}, ErrNotFound
+	}
+	return object, nil
+}
+
+func (s *JournalStore) GetArtifactUsage(_ context.Context, tenantID string) (ArtifactUsage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	usage := s.artifactUsage[tenantID]
+	usage.TenantID = tenantID
+	return usage, nil
+}
+
+func (s *JournalStore) ClaimExpiredArtifacts(
+	_ context.Context,
+	owner string,
+	limit int,
+	now time.Time,
+	duration time.Duration,
+) ([]ArtifactDeletionLease, error) {
+	if owner == "" || limit <= 0 || duration <= 0 {
+		return nil, errors.New("artifact lease owner, positive limit, and duration are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0)
+	for key, object := range s.artifactObjects {
+		lease := s.artifactLeases[key]
+		eligibleStatus := object.Status == ArtifactObjectAvailable || object.Status == ArtifactObjectQuarantined ||
+			object.Status == ArtifactObjectDeleting
+		if !eligibleStatus || object.ExpiresAt.After(now) || lease.AvailableAt.After(now) ||
+			(lease.Owner != "" && lease.ExpiresAt.After(now)) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > limit {
+		keys = keys[:limit]
+	}
+	result := make([]ArtifactDeletionLease, 0, len(keys))
+	for _, key := range keys {
+		object := s.artifactObjects[key]
+		object.Status = ArtifactObjectDeleting
+		object.UpdatedAt = now
+		lease := s.artifactLeases[key]
+		lease.Owner = owner
+		lease.ExpiresAt = now.Add(duration)
+		lease.Attempt++
+		record := journalRecord{
+			Version: 1, Kind: "artifact", ArtifactObject: &object,
+			ArtifactLeaseID: key, ArtifactLease: &lease,
+		}
+		if err := s.append(record); err != nil {
+			return nil, err
+		}
+		s.applyRecord(record)
+		result = append(result, ArtifactDeletionLease{Object: object, Owner: owner, ExpiresAt: lease.ExpiresAt, Attempt: lease.Attempt})
+	}
+	return result, nil
+}
+
+func (s *JournalStore) RenewArtifactLease(
+	_ context.Context,
+	lease ArtifactDeletionLease,
+	now time.Time,
+	duration time.Duration,
+) (ArtifactDeletionLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := resourceKey(lease.Object.TenantID, lease.Object.ID)
+	state, ok := s.artifactLeases[key]
+	if !ok || state.Owner != lease.Owner || !state.ExpiresAt.After(now) {
+		return ArtifactDeletionLease{}, ErrLeaseLost
+	}
+	state.ExpiresAt = now.Add(duration)
+	record := journalRecord{Version: 1, Kind: "artifact_lease", ArtifactLeaseID: key, ArtifactLease: &state}
+	if err := s.append(record); err != nil {
+		return ArtifactDeletionLease{}, err
+	}
+	s.applyRecord(record)
+	lease.ExpiresAt = state.ExpiresAt
+	return lease, nil
+}
+
+func (s *JournalStore) CompleteArtifactDeletion(
+	_ context.Context,
+	lease ArtifactDeletionLease,
+	now time.Time,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := resourceKey(lease.Object.TenantID, lease.Object.ID)
+	state, ok := s.artifactLeases[key]
+	object, objectOK := s.artifactObjects[key]
+	if !ok || !objectOK || state.Owner != lease.Owner || object.Status != ArtifactObjectDeleting {
+		return ErrLeaseLost
+	}
+	usage := s.artifactUsage[object.TenantID]
+	usage.Bytes -= object.SizeBytes
+	usage.Objects--
+	if usage.Bytes < 0 || usage.Objects < 0 {
+		return errors.New("artifact usage invariant violated")
+	}
+	object.Status = ArtifactObjectDeleted
+	object.UpdatedAt = now
+	object.DeletedAt = &now
+	state = artifactLeaseState{}
+	record := journalRecord{
+		Version: 1, Kind: "artifact", ArtifactObject: &object, ArtifactUsage: &usage,
+		ArtifactLeaseID: key, ArtifactLease: &state,
+	}
+	if err := s.append(record); err != nil {
+		return err
+	}
+	s.applyRecord(record)
+	return nil
+}
+
+func (s *JournalStore) RetryArtifactDeletion(
+	_ context.Context,
+	lease ArtifactDeletionLease,
+	availableAt time.Time,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := resourceKey(lease.Object.TenantID, lease.Object.ID)
+	state, ok := s.artifactLeases[key]
+	if !ok || state.Owner != lease.Owner {
+		return ErrLeaseLost
+	}
+	state.Owner = ""
+	state.ExpiresAt = time.Time{}
+	state.AvailableAt = availableAt
+	record := journalRecord{Version: 1, Kind: "artifact_lease", ArtifactLeaseID: key, ArtifactLease: &state}
 	if err := s.append(record); err != nil {
 		return err
 	}

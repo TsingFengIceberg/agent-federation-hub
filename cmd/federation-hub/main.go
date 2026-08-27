@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
+	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	a2afederation "github.com/TsingFengIceberg/agent-federation-hub/internal/federation/a2a"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/hub"
@@ -29,15 +30,42 @@ func main() {
 	publicBaseURL := flag.String("public-base-url", "", "public HTTPS base URL used for optional A2A Push callbacks")
 	allowPrivateAgentURLs := flag.Bool("allow-private-agent-urls", false, "allow HTTP or private Agent Card URLs for local development")
 	credentialEnvAllowlist := flag.String("credential-env-allowlist", "", "comma-separated credential environment variable names tenants may reference")
-	authMode := flag.String("auth-mode", "jwt", "inbound authentication mode: jwt or development")
+	authMode := flag.String("auth-mode", "oidc", "inbound authentication mode: oidc, mtls, oidc-or-mtls, jwt-static, or development")
 	jwtIssuer := flag.String("jwt-issuer", "", "required JWT issuer in jwt auth mode")
 	jwtAudience := flag.String("jwt-audience", "", "required JWT audience in jwt auth mode")
-	jwtPublicKeyFile := flag.String("jwt-public-key-file", "", "PEM public key file in jwt auth mode")
-	jwtKeyID := flag.String("jwt-key-id", "", "required JWT kid mapped to the configured public key")
+	jwtPublicKeyFile := flag.String("jwt-public-key-file", "", "PEM public key file in jwt-static auth mode")
+	jwtKeyID := flag.String("jwt-key-id", "", "required JWT kid mapped to the configured static public key")
+	workloadIdentitiesFile := flag.String("workload-identities-file", "", "JSON mapping from SPIFFE workload IDs to tenant Principals")
+	tlsCertificateFile := flag.String("tls-cert-file", "", "PEM server certificate file")
+	tlsKeyFile := flag.String("tls-key-file", "", "PEM server private key file")
+	tlsClientCAFile := flag.String("tls-client-ca-file", "", "PEM client CA bundle for mTLS authentication")
+	policyURL := flag.String("policy-url", "", "optional HTTPS external policy decision endpoint")
+	policyTokenReference := flag.String("policy-token-ref", "", "optional SecretProvider reference for the policy endpoint Bearer token")
+	tokenProfilesFile := flag.String("token-exchange-profiles-file", "", "JSON RFC 8693 token exchange profile map")
 	remoteTimeout := flag.Duration("remote-timeout", 30*time.Second, "Agent Card and A2A request timeout")
 	reconcileInterval := flag.Duration("reconcile-interval", 30*time.Second, "interval for polling recoverable remote Tasks")
 	workerID := flag.String("worker-id", "", "unique background worker identity; generated when empty")
 	leaseDuration := flag.Duration("worker-lease-duration", 30*time.Second, "background reconciliation lease duration")
+	artifactBackend := flag.String("artifact-storage", "filesystem", "Artifact object backend: filesystem or s3")
+	artifactRoot := flag.String("artifact-root", "var/artifacts", "filesystem Artifact object root")
+	artifactS3Endpoint := flag.String("artifact-s3-endpoint", "", "S3-compatible endpoint host and port")
+	artifactS3Region := flag.String("artifact-s3-region", "", "S3 region")
+	artifactS3Bucket := flag.String("artifact-s3-bucket", "", "S3 bucket")
+	artifactS3Prefix := flag.String("artifact-s3-prefix", "", "S3 object prefix")
+	artifactS3AccessRef := flag.String("artifact-s3-access-key-ref", "", "SecretProvider reference for S3 access key")
+	artifactS3SecretRef := flag.String("artifact-s3-secret-key-ref", "", "SecretProvider reference for S3 secret key")
+	artifactS3SessionRef := flag.String("artifact-s3-session-token-ref", "", "optional SecretProvider reference for S3 session token")
+	artifactS3Secure := flag.Bool("artifact-s3-secure", true, "use TLS for the S3 endpoint")
+	artifactMaxBytes := flag.Int64("artifact-max-bytes", 32<<20, "maximum bytes per Artifact object")
+	artifactTenantMaxBytes := flag.Int64("artifact-tenant-max-bytes", 1<<30, "maximum retained Artifact bytes per tenant")
+	artifactTenantMaxObjects := flag.Int64("artifact-tenant-max-objects", 10000, "maximum retained Artifact objects per tenant")
+	artifactRetention := flag.Duration("artifact-retention", 30*24*time.Hour, "Artifact object retention duration")
+	artifactMIMEAllowlist := flag.String("artifact-mime-allowlist", "text/*,application/json,application/pdf,application/octet-stream,application/zip,image/*,audio/*,video/*", "comma-separated detected MIME allowlist")
+	artifactRequireClean := flag.Bool("artifact-require-clean", false, "require a clean malware scan before Artifact availability")
+	artifactScanner := flag.String("artifact-scanner", "none", "Artifact malware scanner: none or clamav")
+	artifactClamAVNetwork := flag.String("artifact-clamav-network", "tcp", "ClamAV network: tcp or unix")
+	artifactClamAVAddress := flag.String("artifact-clamav-address", "", "ClamAV daemon address")
+	allowPrivateArtifactURIs := flag.Bool("allow-private-artifact-urls", false, "allow private HTTPS Artifact source URLs for local development")
 	flag.Parse()
 
 	store, err := openStore(context.Background(), *storageBackend, *journalPath, *postgresDSNEnv)
@@ -46,20 +74,72 @@ func main() {
 	}
 	defer store.Close()
 
-	secretProvider := secrets.NewEnvProvider(parseAllowlist(*credentialEnvAllowlist))
+	baseSecretProvider := secrets.NewEnvProvider(parseAllowlist(*credentialEnvAllowlist))
+	secretProvider, err := buildSecretProvider(baseSecretProvider, *tokenProfilesFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	artifactMetadata, ok := store.(core.ArtifactMetadataStore)
+	if !ok {
+		log.Fatal("configured Store does not implement Artifact metadata persistence")
+	}
+	artifacts, err := buildArtifactService(context.Background(), artifactOptions{
+		Backend: *artifactBackend, Root: *artifactRoot,
+		S3Endpoint: *artifactS3Endpoint, S3Region: *artifactS3Region,
+		S3Bucket: *artifactS3Bucket, S3Prefix: *artifactS3Prefix,
+		S3AccessKeyReference: *artifactS3AccessRef, S3SecretReference: *artifactS3SecretRef,
+		S3SessionReference: *artifactS3SessionRef, S3Secure: *artifactS3Secure,
+		MaxBytes: *artifactMaxBytes, TenantMaxBytes: *artifactTenantMaxBytes,
+		TenantMaxObjects: *artifactTenantMaxObjects, Retention: *artifactRetention,
+		MIMEAllowlist: *artifactMIMEAllowlist, RequireClean: *artifactRequireClean,
+		Scanner: *artifactScanner, ClamAVNetwork: *artifactClamAVNetwork,
+		ClamAVAddress: *artifactClamAVAddress, AllowPrivateURIs: *allowPrivateArtifactURIs,
+	}, artifactMetadata, secretProvider)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *authMode != "development" && (!*artifactRequireClean || *artifactScanner == "none") {
+		log.Fatal("non-development authentication requires --artifact-require-clean and a configured malware scanner")
+	}
 	adapter := a2afederation.New(*remoteTimeout, secretProvider)
 	service := &hub.Service{
 		Store: store, Adapter: adapter, PublicBaseURL: *publicBaseURL,
 		AllowPrivateAgentURLs: *allowPrivateAgentURLs,
 		Secrets:               secretProvider,
+		Artifacts:             artifacts,
 	}
-	authenticator, err := buildAuthenticator(*authMode, *jwtIssuer, *jwtAudience, *jwtPublicKeyFile, *jwtKeyID)
+	revocations, ok := store.(core.RevocationStore)
+	if !ok {
+		log.Fatal("configured Store does not implement token revocation")
+	}
+	security := securityOptions{
+		AuthMode: *authMode, Issuer: *jwtIssuer, Audience: *jwtAudience,
+		PublicKeyFile: *jwtPublicKeyFile, KeyID: *jwtKeyID,
+		WorkloadIdentityFile: *workloadIdentitiesFile,
+		PolicyURL:            *policyURL, PolicyTokenReference: *policyTokenReference,
+		TokenProfilesFile: *tokenProfilesFile, TLSClientCAFile: *tlsClientCAFile,
+	}
+	authenticator, err := buildAuthenticator(context.Background(), security, revocations)
 	if err != nil {
 		log.Fatal(err)
 	}
+	authorizer, err := buildAuthorizer(security, secretProvider)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tlsConfiguration, err := buildTLSConfig(*authMode, *tlsClientCAFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *authMode != "development" && (*tlsCertificateFile == "" || *tlsKeyFile == "") {
+		log.Fatal("non-development authentication requires --tls-cert-file and --tls-key-file")
+	}
+	if (*tlsCertificateFile == "") != (*tlsKeyFile == "") {
+		log.Fatal("TLS certificate and key files must be configured together")
+	}
 	handler := (&hub.HTTPHandler{
 		Service: service, DecodePush: a2afederation.DecodePush,
-		Authenticator: authenticator, Authorizer: access.DefaultScopeAuthorizer(),
+		Authenticator: authenticator, Authorizer: authorizer,
 		Audit: access.NewJSONAuditSink(os.Stderr),
 	}).Handler()
 	server := &http.Server{
@@ -68,6 +148,7 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
+		TLSConfig:         tlsConfiguration,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -84,6 +165,11 @@ func main() {
 		Store: store, Apply: service, WorkerID: resolvedWorkerID + ":inbox",
 		LeaseDuration: *leaseDuration, PollInterval: time.Second,
 	}
+	artifactLifecycle := &artifactstore.Lifecycle{
+		Metadata: artifactMetadata, Objects: artifacts.Objects,
+		WorkerID: resolvedWorkerID + ":artifacts", LeaseDuration: *leaseDuration,
+		PollInterval: time.Minute,
+	}
 	go func() {
 		if err := background.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("background reconciliation stopped: %v", err)
@@ -92,6 +178,11 @@ func main() {
 	go func() {
 		if err := inbox.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("Push inbox processor stopped: %v", err)
+		}
+	}()
+	go func() {
+		if err := artifactLifecycle.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Artifact lifecycle worker stopped: %v", err)
 		}
 	}()
 	go func() {
@@ -104,8 +195,14 @@ func main() {
 	}()
 
 	log.Printf("Agent Federation Hub listening on %s", *listen)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	var serveErr error
+	if *tlsCertificateFile != "" {
+		serveErr = server.ListenAndServeTLS(*tlsCertificateFile, *tlsKeyFile)
+	} else {
+		serveErr = server.ListenAndServe()
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Fatal(serveErr)
 	}
 }
 
@@ -121,32 +218,6 @@ func openStore(ctx context.Context, backend, journalPath, postgresDSNEnv string)
 		return core.OpenPostgres(ctx, dataSourceName)
 	default:
 		return nil, fmt.Errorf("unsupported storage backend %q", backend)
-	}
-}
-
-func buildAuthenticator(mode, issuer, audience, publicKeyFile, keyID string) (hub.Authenticator, error) {
-	switch mode {
-	case "development":
-		log.Print("WARNING: development header authentication is enabled and is not a production security boundary")
-		return hub.DevelopmentAuthenticator{}, nil
-	case "jwt":
-		if issuer == "" || audience == "" || publicKeyFile == "" || keyID == "" {
-			return nil, errors.New("jwt auth mode requires --jwt-issuer, --jwt-audience, --jwt-public-key-file, and --jwt-key-id")
-		}
-		encoded, err := os.ReadFile(publicKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("read JWT public key: %w", err)
-		}
-		key, err := hub.ParsePublicKeyPEM(encoded)
-		if err != nil {
-			return nil, err
-		}
-		return &hub.JWTAuthenticator{
-			Issuer: issuer, Audience: audience,
-			Keys: hub.StaticKeyProvider{Keys: map[string]any{keyID: key}},
-		}, nil
-	default:
-		return nil, fmt.Errorf("unsupported auth mode %q", mode)
 	}
 }
 

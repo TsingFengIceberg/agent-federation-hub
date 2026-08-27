@@ -46,14 +46,16 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 type Action string
 
 const (
-	ActionAgentRegister Action = "agent.register"
-	ActionAgentList     Action = "agent.list"
-	ActionTaskSubmit    Action = "task.submit"
-	ActionTaskRead      Action = "task.read"
-	ActionTaskEvents    Action = "task.events"
-	ActionTaskCancel    Action = "task.cancel"
-	ActionTaskReconcile Action = "task.reconcile"
-	ActionPushConfigure Action = "push.configure"
+	ActionAgentRegister  Action = "agent.register"
+	ActionAgentList      Action = "agent.list"
+	ActionTaskSubmit     Action = "task.submit"
+	ActionTaskRead       Action = "task.read"
+	ActionTaskEvents     Action = "task.events"
+	ActionTaskCancel     Action = "task.cancel"
+	ActionTaskReconcile  Action = "task.reconcile"
+	ActionPushConfigure  Action = "push.configure"
+	ActionSecurityRevoke Action = "security.revoke"
+	ActionArtifactRead   Action = "artifact.read"
 )
 
 type Request struct {
@@ -71,14 +73,16 @@ type ScopeAuthorizer struct {
 
 func DefaultScopeAuthorizer() *ScopeAuthorizer {
 	return &ScopeAuthorizer{Required: map[Action]string{
-		ActionAgentRegister: "agents:write",
-		ActionAgentList:     "agents:read",
-		ActionTaskSubmit:    "tasks:submit",
-		ActionTaskRead:      "tasks:read",
-		ActionTaskEvents:    "tasks:read",
-		ActionTaskCancel:    "tasks:cancel",
-		ActionTaskReconcile: "tasks:reconcile",
-		ActionPushConfigure: "push:configure",
+		ActionAgentRegister:  "agents:write",
+		ActionAgentList:      "agents:read",
+		ActionTaskSubmit:     "tasks:submit",
+		ActionTaskRead:       "tasks:read",
+		ActionTaskEvents:     "tasks:read",
+		ActionTaskCancel:     "tasks:cancel",
+		ActionTaskReconcile:  "tasks:reconcile",
+		ActionPushConfigure:  "push:configure",
+		ActionSecurityRevoke: "security:revoke",
+		ActionArtifactRead:   "artifacts:read",
 	}}
 }
 

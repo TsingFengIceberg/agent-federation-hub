@@ -76,8 +76,12 @@ type JWTAuthenticator struct {
 	RolesClaim  string
 	Algorithms  []string
 	Keys        JWTKeyProvider
-	Leeway      time.Duration
-	Now         func() time.Time
+	Revocations interface {
+		TokenRevoked(context.Context, string, string, string, time.Time) (bool, error)
+	}
+	RequireTokenID bool
+	Leeway         time.Duration
+	Now            func() time.Time
 }
 
 func (a *JWTAuthenticator) Authenticate(ctx context.Context, request *http.Request) (access.Principal, error) {
@@ -128,13 +132,30 @@ func (a *JWTAuthenticator) Authenticate(ctx context.Context, request *http.Reque
 	if rolesClaim == "" {
 		rolesClaim = "roles"
 	}
-	return access.Principal{
+	principal := access.Principal{
 		Subject: subject, TenantID: tenantID, Issuer: a.Issuer,
 		AuthMethod: "oidc-jwt", Scopes: stringListClaim(claims[scopeClaim], true),
 		Roles:      stringListClaim(claims[rolesClaim], false),
 		Delegation: delegationClaim(claims["delegation"]),
 		TokenID:    stringClaim(claims["jti"]),
-	}, nil
+	}
+	if a.RequireTokenID && principal.TokenID == "" {
+		return access.Principal{}, fmt.Errorf("%w: token ID claim is required", access.ErrUnauthenticated)
+	}
+	if a.Revocations != nil && principal.TokenID != "" {
+		revoked, err := a.Revocations.TokenRevoked(ctx, principal.Issuer, principal.TokenID, principal.TenantID, a.now())
+		if err != nil || revoked {
+			return access.Principal{}, fmt.Errorf("%w: bearer token is revoked or revocation status is unavailable", access.ErrUnauthenticated)
+		}
+	}
+	return principal, nil
+}
+
+func (a *JWTAuthenticator) now() time.Time {
+	if a.Now != nil {
+		return a.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func bearerToken(value string) (string, error) {

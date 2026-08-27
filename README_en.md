@@ -4,7 +4,7 @@
 
 Agent Federation Hub is a research-oriented open-source project about cross-domain and cross-organization collaboration between AI agents. It does not try to orchestrate every agent inside one business. Instead, it explores how independently deployed agent systems, built with different frameworks and governed by different trust boundaries, can discover one another and collaborate through protocols that are observable, authenticated, and recoverable.
 
-> Current status: the A2A protocol and open-source ecosystem research baseline has been imported in full. The repository now has an A2A `1.0` JSON-RPC/SSE interoperability baseline, an authenticated Principal/scope boundary, a replaceable SecretProvider, transactional PostgreSQL storage, multi-instance work leases, a durable Push inbox, and continuous SSE driven by committed Events. JWT currently uses a static PEM public key; dynamic OIDC/JWKS, rate limits, external Artifact object storage, backup/HA validation, and complete protocol-aligned Inspector/TCK validation remain incomplete. The local journal remains a single-process development backend.
+> Current status: the A2A protocol and open-source ecosystem research baseline has been imported in full. The repository now has an A2A `1.0` JSON-RPC/SSE interoperability baseline, dynamic OIDC/JWKS, SPIFFE mTLS, external policy and RFC 8693 Token Exchange boundaries, PostgreSQL multi-instance leases, and a durable Push inbox. A2A Raw/URL Artifacts enter a filesystem or S3/MinIO object data plane with size, MIME, scanning, quota, and lifecycle controls. Real partner IdP/CA/PDP integration, rate limits, durable audit, backup/HA validation, and complete protocol-aligned Inspector/TCK validation remain incomplete. The local journal and filesystem object store remain single-process development backends.
 
 ## Direction
 
@@ -36,6 +36,8 @@ The initial boundary is to use A2A as the primary cross-agent protocol and AAMP 
 | [`docs/architecture/phase-one-hub-conformance-boundary.md`](docs/architecture/phase-one-hub-conformance-boundary.md) | Current Hub, Push, TCK, Registry/Gateway, and AAMP capability boundary |
 | [`docs/adr/0003-authenticated-principal-and-policy-boundary.md`](docs/adr/0003-authenticated-principal-and-policy-boundary.md) | Implemented authenticated Principal, authorization, audit, and SecretProvider boundary |
 | [`docs/adr/0004-postgresql-leased-background-execution.md`](docs/adr/0004-postgresql-leased-background-execution.md) | PostgreSQL transactions, multi-instance leases, and durable Push inbox decision |
+| [`docs/adr/0005-federated-workload-trust.md`](docs/adr/0005-federated-workload-trust.md) | OIDC, SPIFFE mTLS, external policy, token exchange, and revocation boundary |
+| [`docs/adr/0006-artifact-object-data-plane.md`](docs/adr/0006-artifact-object-data-plane.md) | Artifact object storage, content policy, scanning, quota, and lifecycle decision |
 
 General A2A protocol and cross-project research remains canonical in `agent-systems-study`. This repository keeps a traceable full snapshot synchronized one way from a recorded source commit; product architecture, ADRs, specifications, implementation, and tests evolve only here.
 
@@ -47,7 +49,7 @@ Werewolf validates private information, turn-based state, and adversarial collab
 
 - **Phase 0: Protocol baseline and conformance**: the initial A2A `1.0` JSON-RPC/SSE profile is selected and repository-owned Go/Python interoperability and contract tests pass; complete Inspector/TCK validation aligned to the selected protocol revision remains open.
 - **Phase 1: Minimal interoperability**: the first Go Hub service slice implements built-in Agent Card registration, a durable task journal, resumable events, cancellation, reconciliation, tenant isolation, and Push reception; distributed and production hardening are outside the current completion claim.
-- **Phase 2: Async and governance**: the initial JWT Principal, scope authorization, structured audit, SecretProvider, PostgreSQL leased reconciliation, and durable Push inbox are implemented; dynamic identity federation, rate limits, AAMP transport, and human approval remain open.
+- **Phase 2: Async and governance**: dynamic OIDC/JWKS, SPIFFE mTLS, external policy, token exchange/revocation, PostgreSQL leased reconciliation, the durable Push inbox, and a PostgreSQL 17/MinIO-tested Artifact data plane are implemented; real trust-service integration, rate limits, durable audit, AAMP transport, and human approval remain open.
 - **Phase 3: Scenario validation**: validate reuse of the same core across orthogonal scenarios.
 
 ## License and Implementation Commitment

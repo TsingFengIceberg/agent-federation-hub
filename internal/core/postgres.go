@@ -497,6 +497,396 @@ func (s *PostgresStore) RetryInbox(ctx context.Context, lease InboxLease, availa
 	return nil
 }
 
+func (s *PostgresStore) RevokeToken(ctx context.Context, revocation TokenRevocation) error {
+	if revocation.Issuer == "" || revocation.TokenID == "" || revocation.TenantID == "" ||
+		revocation.RevokedAt.IsZero() || revocation.ExpiresAt.IsZero() {
+		return errors.New("revocation issuer, token ID, tenant, revoked time, and expiry are required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO afh_token_revocations (issuer, token_id, tenant_id, reason, revoked_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (issuer, token_id, tenant_id) DO UPDATE
+		SET reason=EXCLUDED.reason,
+			revoked_at=LEAST(afh_token_revocations.revoked_at, EXCLUDED.revoked_at),
+			expires_at=GREATEST(afh_token_revocations.expires_at, EXCLUDED.expires_at)`,
+		revocation.Issuer, revocation.TokenID, revocation.TenantID,
+		revocation.Reason, revocation.RevokedAt, revocation.ExpiresAt)
+	return err
+}
+
+func (s *PostgresStore) TokenRevoked(
+	ctx context.Context,
+	issuer string,
+	tokenID string,
+	tenantID string,
+	now time.Time,
+) (bool, error) {
+	var revoked bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM afh_token_revocations
+			WHERE issuer=$1 AND token_id=$2 AND tenant_id=$3 AND expires_at>$4
+		)`, issuer, tokenID, tenantID, now).Scan(&revoked)
+	return revoked, err
+}
+
+func (s *PostgresStore) PruneRevocations(ctx context.Context, now time.Time) (int64, error) {
+	command, err := s.pool.Exec(ctx, `DELETE FROM afh_token_revocations WHERE expires_at <= $1`, now)
+	if err != nil {
+		return 0, err
+	}
+	return command.RowsAffected(), nil
+}
+
+func (s *PostgresStore) ReserveArtifact(
+	ctx context.Context,
+	object ArtifactObject,
+	quota ArtifactQuota,
+) (ArtifactObject, bool, error) {
+	if err := validateArtifactReservation(object); err != nil {
+		return ArtifactObject{}, false, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return ArtifactObject{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO afh_artifact_usage (tenant_id) VALUES ($1)
+		ON CONFLICT (tenant_id) DO NOTHING`, object.TenantID); err != nil {
+		return ArtifactObject{}, false, err
+	}
+	var usage ArtifactUsage
+	usage.TenantID = object.TenantID
+	if err := tx.QueryRow(ctx, `
+		SELECT bytes, objects FROM afh_artifact_usage WHERE tenant_id=$1 FOR UPDATE`,
+		object.TenantID).Scan(&usage.Bytes, &usage.Objects); err != nil {
+		return ArtifactObject{}, false, err
+	}
+	existing, found, err := getArtifactRow(ctx, tx, object.TenantID, object.ID, true)
+	if err != nil {
+		return ArtifactObject{}, false, err
+	}
+	if found {
+		if !sameArtifactIdentity(existing, object) {
+			return ArtifactObject{}, false, ErrConflict
+		}
+		if existing.Status != ArtifactObjectFailed {
+			return existing, false, nil
+		}
+	}
+	if (quota.MaxBytes > 0 && usage.Bytes+object.SizeBytes > quota.MaxBytes) ||
+		(quota.MaxObjects > 0 && usage.Objects+1 > quota.MaxObjects) {
+		return ArtifactObject{}, false, ErrQuotaExceeded
+	}
+	object.Status = ArtifactObjectPending
+	object.ScanStatus = ArtifactScanNotScanned
+	object.StorageKey = ""
+	object.FailureCode = ""
+	object.DeletedAt = nil
+	if found {
+		_, err = tx.Exec(ctx, `
+			UPDATE afh_artifacts SET storage_key='', detected_media_type='', status=$1, scan_status=$2,
+				updated_at=$3, deleted_at=NULL, failure_code='', lease_owner='', lease_expires_at=NULL,
+				available_at='-infinity'
+			WHERE tenant_id=$4 AND id=$5`,
+			object.Status, object.ScanStatus, object.UpdatedAt, object.TenantID, object.ID)
+	} else {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO afh_artifacts (
+				tenant_id, id, task_id, artifact_id, part_index, sha256, size_bytes,
+				declared_media_type, filename, source_uri, status, scan_status,
+				created_at, updated_at, expires_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			object.TenantID, object.ID, object.TaskID, object.ArtifactID, object.PartIndex,
+			object.SHA256, object.SizeBytes, object.DeclaredMediaType, object.Filename,
+			object.SourceURI, object.Status, object.ScanStatus, object.CreatedAt,
+			object.UpdatedAt, object.ExpiresAt)
+	}
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ArtifactObject{}, false, ErrConflict
+		}
+		return ArtifactObject{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE afh_artifact_usage SET bytes=bytes+$1, objects=objects+1 WHERE tenant_id=$2`,
+		object.SizeBytes, object.TenantID); err != nil {
+		return ArtifactObject{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ArtifactObject{}, false, err
+	}
+	return object, true, nil
+}
+
+func (s *PostgresStore) FinalizeArtifact(
+	ctx context.Context,
+	tenantID, id, storageKey, detectedMediaType string,
+	scanStatus ArtifactScanStatus,
+	status ArtifactObjectStatus,
+	now time.Time,
+) (ArtifactObject, error) {
+	if storageKey == "" || (status != ArtifactObjectAvailable && status != ArtifactObjectQuarantined) {
+		return ArtifactObject{}, errors.New("storage key and a final available or quarantined status are required")
+	}
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_artifacts
+		SET storage_key=$1, detected_media_type=$2, scan_status=$3, status=$4, updated_at=$5
+		WHERE tenant_id=$6 AND id=$7 AND status='PENDING'`,
+		storageKey, detectedMediaType, scanStatus, status, now, tenantID, id)
+	if err != nil {
+		return ArtifactObject{}, err
+	}
+	if command.RowsAffected() != 1 {
+		existing, getErr := s.GetArtifact(ctx, tenantID, id)
+		if getErr != nil {
+			return ArtifactObject{}, getErr
+		}
+		if existing.Status != status || existing.StorageKey != storageKey {
+			return ArtifactObject{}, ErrConflict
+		}
+		return existing, nil
+	}
+	return s.GetArtifact(ctx, tenantID, id)
+}
+
+func (s *PostgresStore) FailArtifact(
+	ctx context.Context,
+	tenantID, id, failureCode string,
+	now time.Time,
+) (ArtifactObject, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return ArtifactObject{}, err
+	}
+	defer tx.Rollback(ctx)
+	object, found, err := getArtifactRow(ctx, tx, tenantID, id, true)
+	if err != nil {
+		return ArtifactObject{}, err
+	}
+	if !found {
+		return ArtifactObject{}, ErrNotFound
+	}
+	if object.Status == ArtifactObjectFailed {
+		return object, nil
+	}
+	if object.Status != ArtifactObjectPending {
+		return ArtifactObject{}, ErrConflict
+	}
+	object.Status = ArtifactObjectFailed
+	object.FailureCode = failureCode
+	object.UpdatedAt = now
+	if _, err := tx.Exec(ctx, `
+		UPDATE afh_artifacts SET status=$1, failure_code=$2, updated_at=$3
+		WHERE tenant_id=$4 AND id=$5`, object.Status, failureCode, now, tenantID, id); err != nil {
+		return ArtifactObject{}, err
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE afh_artifact_usage SET bytes=bytes-$1, objects=objects-1
+		WHERE tenant_id=$2 AND bytes >= $1 AND objects > 0`, object.SizeBytes, tenantID)
+	if err != nil {
+		return ArtifactObject{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return ArtifactObject{}, errors.New("artifact usage invariant violated")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ArtifactObject{}, err
+	}
+	return object, nil
+}
+
+func (s *PostgresStore) GetArtifact(ctx context.Context, tenantID, id string) (ArtifactObject, error) {
+	object, found, err := getArtifactRow(ctx, s.pool, tenantID, id, false)
+	if err != nil {
+		return ArtifactObject{}, err
+	}
+	if !found {
+		return ArtifactObject{}, ErrNotFound
+	}
+	return object, nil
+}
+
+func (s *PostgresStore) GetArtifactUsage(ctx context.Context, tenantID string) (ArtifactUsage, error) {
+	usage := ArtifactUsage{TenantID: tenantID}
+	err := s.pool.QueryRow(ctx, `
+		SELECT bytes, objects FROM afh_artifact_usage WHERE tenant_id=$1`, tenantID).Scan(&usage.Bytes, &usage.Objects)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return usage, nil
+	}
+	return usage, err
+}
+
+func (s *PostgresStore) ClaimExpiredArtifacts(
+	ctx context.Context,
+	owner string,
+	limit int,
+	now time.Time,
+	duration time.Duration,
+) ([]ArtifactDeletionLease, error) {
+	if owner == "" || limit <= 0 || duration <= 0 {
+		return nil, errors.New("artifact lease owner, positive limit, and duration are required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT tenant_id, id FROM afh_artifacts
+			WHERE status IN ('AVAILABLE', 'QUARANTINED', 'DELETING')
+			  AND expires_at <= $1 AND available_at <= $1
+			  AND (lease_owner='' OR lease_expires_at <= $1)
+			ORDER BY available_at, expires_at, tenant_id, id
+			FOR UPDATE SKIP LOCKED LIMIT $2
+		)
+		UPDATE afh_artifacts AS artifact
+		SET status='DELETING', updated_at=$1, lease_owner=$3, lease_expires_at=$4,
+			delete_attempts=artifact.delete_attempts+1
+		FROM candidates
+		WHERE artifact.tenant_id=candidates.tenant_id AND artifact.id=candidates.id
+		RETURNING artifact.tenant_id, artifact.id, artifact.task_id, artifact.artifact_id,
+			artifact.part_index, artifact.storage_key, artifact.sha256, artifact.size_bytes,
+			artifact.declared_media_type, artifact.detected_media_type, artifact.filename,
+			artifact.source_uri, artifact.status, artifact.scan_status, artifact.created_at,
+			artifact.updated_at, artifact.expires_at, artifact.deleted_at, artifact.failure_code,
+			artifact.lease_expires_at, artifact.delete_attempts`,
+		now, limit, owner, now.Add(duration))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]ArtifactDeletionLease, 0)
+	for rows.Next() {
+		var object ArtifactObject
+		var expiresAt time.Time
+		var attempt uint32
+		if err := scanArtifact(rows, &object, &expiresAt, &attempt); err != nil {
+			return nil, err
+		}
+		result = append(result, ArtifactDeletionLease{Object: object, Owner: owner, ExpiresAt: expiresAt, Attempt: attempt})
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) RenewArtifactLease(
+	ctx context.Context,
+	lease ArtifactDeletionLease,
+	now time.Time,
+	duration time.Duration,
+) (ArtifactDeletionLease, error) {
+	expiresAt := now.Add(duration)
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_artifacts SET lease_expires_at=$1
+		WHERE tenant_id=$2 AND id=$3 AND status='DELETING' AND lease_owner=$4 AND lease_expires_at>$5`,
+		expiresAt, lease.Object.TenantID, lease.Object.ID, lease.Owner, now)
+	if err != nil {
+		return ArtifactDeletionLease{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return ArtifactDeletionLease{}, ErrLeaseLost
+	}
+	lease.ExpiresAt = expiresAt
+	return lease, nil
+}
+
+func (s *PostgresStore) CompleteArtifactDeletion(
+	ctx context.Context,
+	lease ArtifactDeletionLease,
+	now time.Time,
+) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	object, found, err := getArtifactRow(ctx, tx, lease.Object.TenantID, lease.Object.ID, true)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrNotFound
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE afh_artifacts SET status='DELETED', updated_at=$1, deleted_at=$1,
+			lease_owner='', lease_expires_at=NULL
+		WHERE tenant_id=$2 AND id=$3 AND status='DELETING' AND lease_owner=$4`,
+		now, object.TenantID, object.ID, lease.Owner)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	command, err = tx.Exec(ctx, `
+		UPDATE afh_artifact_usage SET bytes=bytes-$1, objects=objects-1
+		WHERE tenant_id=$2 AND bytes >= $1 AND objects > 0`, object.SizeBytes, object.TenantID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("artifact usage invariant violated")
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) RetryArtifactDeletion(
+	ctx context.Context,
+	lease ArtifactDeletionLease,
+	availableAt time.Time,
+) error {
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_artifacts SET available_at=$1, lease_owner='', lease_expires_at=NULL
+		WHERE tenant_id=$2 AND id=$3 AND status='DELETING' AND lease_owner=$4`,
+		availableAt, lease.Object.TenantID, lease.Object.ID, lease.Owner)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+type artifactRow interface {
+	Scan(...any) error
+}
+
+type artifactQuery interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func getArtifactRow(
+	ctx context.Context,
+	query artifactQuery,
+	tenantID, id string,
+	forUpdate bool,
+) (ArtifactObject, bool, error) {
+	statement := `
+		SELECT tenant_id, id, task_id, artifact_id, part_index, storage_key, sha256, size_bytes,
+			declared_media_type, detected_media_type, filename, source_uri, status, scan_status,
+			created_at, updated_at, expires_at, deleted_at, failure_code
+		FROM afh_artifacts WHERE tenant_id=$1 AND id=$2`
+	if forUpdate {
+		statement += " FOR UPDATE"
+	}
+	var object ArtifactObject
+	err := scanArtifact(query.QueryRow(ctx, statement, tenantID, id), &object)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ArtifactObject{}, false, nil
+	}
+	return object, err == nil, err
+}
+
+func scanArtifact(row artifactRow, object *ArtifactObject, extra ...any) error {
+	targets := []any{
+		&object.TenantID, &object.ID, &object.TaskID, &object.ArtifactID, &object.PartIndex,
+		&object.StorageKey, &object.SHA256, &object.SizeBytes, &object.DeclaredMediaType,
+		&object.DetectedMediaType, &object.Filename, &object.SourceURI, &object.Status,
+		&object.ScanStatus, &object.CreatedAt, &object.UpdatedAt, &object.ExpiresAt,
+		&object.DeletedAt, &object.FailureCode,
+	}
+	targets = append(targets, extra...)
+	return row.Scan(targets...)
+}
+
 func (s *PostgresStore) Close() error {
 	s.pool.Close()
 	return nil

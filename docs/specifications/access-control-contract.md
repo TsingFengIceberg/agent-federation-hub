@@ -28,6 +28,8 @@ for production.
 | Cancel Task | `tasks:cancel` |
 | Reconcile Task | `tasks:reconcile` |
 | Enable Push while submitting | `push:configure` in addition to `tasks:submit` |
+| Read Artifact metadata/content | `artifacts:read` |
+| Revoke a token ID for the caller tenant | `security:revoke` |
 
 The built-in scope policy accepts `*` only for the explicit development
 principal. A replaceable Authorizer may add roles, resource attributes, external
@@ -36,17 +38,31 @@ policy evaluation, or denial masking without changing HTTP handlers.
 ## Trust Directions
 
 ```text
-management caller -- JWT/mTLS --> Hub Principal
+management caller -- OIDC JWT / SPIFFE mTLS --> Hub Principal
 Hub -- SecretProvider credential --> remote A2A Agent
 remote A2A Agent -- task callback token --> Hub Push inbox
-delegated end user -- future token exchange --> target service
+delegated subject/actor -- RFC 8693 token exchange --> target service
 ```
 
 No credential is automatically reused across these directions. Audit records
 contain decision metadata but exclude credentials and payloads.
 
+## Implemented Trust Edges
+
+- OIDC discovery and bounded JWKS caching support RSA, ECDSA, and Ed25519 keys;
+  an unknown `kid` triggers a rate-limited refresh for key rotation.
+- Verified mTLS maps exactly one SPIFFE URI SAN through a replaceable workload
+  resolver. Hybrid mode never downgrades an invalid Bearer credential to mTLS.
+- The local scope map can be chained with an HTTPS external policy endpoint;
+  denial, transport failure, or malformed decisions fail closed.
+- RFC 8693 Token Exchange profiles bind subject/actor credentials, audience,
+  resource, and scopes while exposing only SecretProvider references to adapters.
+- OIDC requires `jti`; tenant/issuer/token revocations persist in the journal or
+  PostgreSQL and authentication fails if revocation state is unavailable.
+
 ## Current Gates
 
-Dynamic OIDC discovery/JWKS refresh, key rotation tests, mTLS authentication,
-external policy administration, rate limits, durable audit export, OAuth Token
-Exchange, and revocation remain unimplemented.
+Production acceptance still requires real partner IdP, CA, and policy-service
+interoperability; automated key/certificate rollover; rate limiting; policy
+authoring and distribution; durable audit export; consent workflows; and trust
+service outage drills. Deterministic tests establish the local contract only.

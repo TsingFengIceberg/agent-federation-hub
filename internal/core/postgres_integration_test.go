@@ -26,7 +26,9 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	if _, err := first.pool.Exec(ctx, `TRUNCATE afh_events, afh_tasks, afh_agents CASCADE`); err != nil {
+	if _, err := first.pool.Exec(ctx, `
+		TRUNCATE afh_artifacts, afh_artifact_usage, afh_token_revocations,
+			afh_events, afh_inbox, afh_tasks, afh_agents CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -157,5 +159,83 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 	}
 	if pending, err := first.ClaimInbox(ctx, "inbox-worker-c", 1, now.Add(2*time.Minute), time.Minute); err != nil || len(pending) != 0 {
 		t.Fatalf("acked inbox redelivered=%+v err=%v", pending, err)
+	}
+
+	revocation := TokenRevocation{
+		Issuer: "https://issuer.example", TokenID: "token-a", TenantID: task.TenantID,
+		RevokedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	if err := first.RevokeToken(ctx, revocation); err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := second.TokenRevoked(ctx, revocation.Issuer, revocation.TokenID, revocation.TenantID, now); err != nil || !revoked {
+		t.Fatalf("PostgreSQL revocation active=%v err=%v", revoked, err)
+	}
+
+	object := ArtifactObject{
+		ID: "object-a", TenantID: task.TenantID, TaskID: task.ID, ArtifactID: "artifact-a",
+		PartIndex: 0, SHA256: "digest-a", SizeBytes: 10,
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	start = make(chan struct{})
+	type reservationResult struct {
+		object  ArtifactObject
+		created bool
+		err     error
+	}
+	reservations := make(chan reservationResult, 2)
+	wait = sync.WaitGroup{}
+	for _, store := range []*PostgresStore{first, second} {
+		wait.Add(1)
+		go func(store *PostgresStore) {
+			defer wait.Done()
+			<-start
+			reserved, created, err := store.ReserveArtifact(ctx, object, ArtifactQuota{MaxBytes: 10, MaxObjects: 1})
+			reservations <- reservationResult{object: reserved, created: created, err: err}
+		}(store)
+	}
+	close(start)
+	wait.Wait()
+	close(reservations)
+	createdCount := 0
+	for result := range reservations {
+		if result.err != nil || result.object.ID != object.ID {
+			t.Fatalf("reservation object=%+v created=%v error=%v", result.object, result.created, result.err)
+		}
+		if result.created {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created Artifact reservations=%d, want 1", createdCount)
+	}
+	usage, err := second.GetArtifactUsage(ctx, task.TenantID)
+	if err != nil || usage.Bytes != object.SizeBytes || usage.Objects != 1 {
+		t.Fatalf("PostgreSQL Artifact usage=%+v err=%v", usage, err)
+	}
+	if _, err := first.FinalizeArtifact(
+		ctx, object.TenantID, object.ID, "aa/object-a", "text/plain",
+		ArtifactScanClean, ArtifactObjectAvailable, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	artifactLeasesA, err := first.ClaimExpiredArtifacts(ctx, "artifact-worker-a", 1, now.Add(2*time.Hour), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactLeasesB, err := second.ClaimExpiredArtifacts(ctx, "artifact-worker-b", 1, now.Add(2*time.Hour), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifactLeasesA)+len(artifactLeasesB) != 1 {
+		t.Fatalf("multi-instance Artifact leases: first=%+v second=%+v", artifactLeasesA, artifactLeasesB)
+	}
+	artifactLease := append(artifactLeasesA, artifactLeasesB...)[0]
+	if err := second.CompleteArtifactDeletion(ctx, artifactLease, now.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	usage, err = first.GetArtifactUsage(ctx, task.TenantID)
+	if err != nil || usage.Bytes != 0 || usage.Objects != 0 {
+		t.Fatalf("deleted PostgreSQL Artifact usage=%+v err=%v", usage, err)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
@@ -23,6 +24,7 @@ type Service struct {
 	PublicBaseURL         string
 	AllowPrivateAgentURLs bool
 	Secrets               secrets.Provider
+	Artifacts             *artifactstore.Service
 	Now                   func() time.Time
 	TokenGenerator        func() (string, error)
 }
@@ -37,6 +39,13 @@ type SubmitTaskInput struct {
 	AgentID    string `json:"agentId"`
 	Text       string `json:"text"`
 	EnablePush bool   `json:"enablePush,omitempty"`
+}
+
+type RevokeTokenInput struct {
+	Issuer    string    `json:"issuer"`
+	TokenID   string    `json:"tokenId"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	Reason    string    `json:"reason,omitempty"`
 }
 
 func (s *Service) RegisterAgent(ctx context.Context, tenantID string, input RegisterAgentInput) (core.Agent, error) {
@@ -92,6 +101,32 @@ func (s *Service) RegisterAgent(ctx context.Context, tenantID string, input Regi
 
 func (s *Service) ListAgents(ctx context.Context, tenantID string) ([]core.Agent, error) {
 	return s.Store.ListAgents(ctx, tenantID)
+}
+
+func (s *Service) RevokeToken(ctx context.Context, tenantID string, input RevokeTokenInput) (core.TokenRevocation, error) {
+	if tenantID == "" || strings.TrimSpace(input.Issuer) == "" || strings.TrimSpace(input.TokenID) == "" {
+		return core.TokenRevocation{}, errors.New("tenant, issuer, and token ID are required")
+	}
+	if len(input.TokenID) > 512 || len(input.Issuer) > 2048 || len(input.Reason) > 512 {
+		return core.TokenRevocation{}, errors.New("revocation input exceeds field limits")
+	}
+	now := s.now()
+	if !input.ExpiresAt.After(now) {
+		return core.TokenRevocation{}, errors.New("revocation expiry must be in the future")
+	}
+	store, ok := s.Store.(core.RevocationStore)
+	if !ok {
+		return core.TokenRevocation{}, errors.New("revocation store is not configured")
+	}
+	revocation := core.TokenRevocation{
+		Issuer: strings.TrimSpace(input.Issuer), TokenID: strings.TrimSpace(input.TokenID),
+		TenantID: tenantID, Reason: strings.TrimSpace(input.Reason),
+		RevokedAt: now, ExpiresAt: input.ExpiresAt.UTC(),
+	}
+	if err := store.RevokeToken(ctx, revocation); err != nil {
+		return core.TokenRevocation{}, err
+	}
+	return revocation, nil
 }
 
 func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitTaskInput) (core.Task, error) {
@@ -339,6 +374,15 @@ func (s *Service) applyObservation(ctx context.Context, task core.Task, observat
 	if baseKey == "" {
 		baseKey = "observation:" + core.DigestJSON(observation)
 	}
+	for updateIndex := range observation.Artifacts {
+		externalized, err := s.externalizeArtifact(
+			ctx, task, observation.Artifacts[updateIndex].Artifact, baseKey, updateIndex,
+		)
+		if err != nil {
+			return task, err
+		}
+		observation.Artifacts[updateIndex].Artifact = externalized
+	}
 	if observation.State != core.TaskStateUnknown || observation.RemoteTaskID != "" || observation.Problem != nil || observation.CancelRequested {
 		var err error
 		task, _, err = s.Store.ApplyTask(ctx, task.TenantID, task.ID, baseKey+":status", func(current *core.Task) (core.Event, error) {
@@ -388,6 +432,53 @@ func (s *Service) applyObservation(ctx context.Context, task core.Task, observat
 		}
 	}
 	return task, nil
+}
+
+func (s *Service) externalizeArtifact(
+	ctx context.Context,
+	task core.Task,
+	value core.Artifact,
+	dedupKey string,
+	updateIndex int,
+) (core.Artifact, error) {
+	for partIndex := range value.Parts {
+		part := &value.Parts[partIndex]
+		if part.Kind != core.PartFile || part.ObjectID != "" || (part.BytesBase64 == "" && part.URI == "") {
+			continue
+		}
+		if s.Artifacts == nil {
+			return core.Artifact{}, errors.New("artifact object storage is not configured")
+		}
+		input := artifactstore.Input{
+			TenantID: task.TenantID, TaskID: task.ID, ArtifactID: value.ID,
+			DedupKey: fmt.Sprintf("%s:%d", dedupKey, updateIndex), PartIndex: partIndex,
+			MediaType: part.MediaType, Filename: part.Filename,
+		}
+		var object core.ArtifactObject
+		var err error
+		if part.BytesBase64 != "" {
+			object, err = s.Artifacts.IngestBase64(ctx, input, part.BytesBase64)
+		} else {
+			object, err = s.Artifacts.IngestURI(ctx, input, part.URI)
+		}
+		if err != nil {
+			return core.Artifact{}, fmt.Errorf("externalize Artifact %q Part %d: %w", value.ID, partIndex, err)
+		}
+		part.BytesBase64 = ""
+		part.URI = ""
+		part.ObjectID = object.ID
+		part.SizeBytes = object.SizeBytes
+		part.SHA256 = object.SHA256
+		part.MediaType = object.DetectedMediaType
+	}
+	return value, nil
+}
+
+func (s *Service) GetArtifact(ctx context.Context, tenantID, artifactID string) (core.ArtifactObject, error) {
+	if s.Artifacts == nil {
+		return core.ArtifactObject{}, errors.New("artifact object storage is not configured")
+	}
+	return s.Artifacts.Get(ctx, tenantID, artifactID)
 }
 
 func shouldApplyState(task core.Task, observation federation.Observation) bool {

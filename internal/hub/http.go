@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
+	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 )
@@ -38,8 +40,67 @@ func (h *HTTPHandler) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tasks/{taskID}/events", h.protected(access.ActionTaskEvents, h.getEvents))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/cancel", h.protected(access.ActionTaskCancel, h.cancelTask))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/reconcile", h.protected(access.ActionTaskReconcile, h.reconcileTask))
+	mux.HandleFunc("POST /v1/security/revocations", h.protected(access.ActionSecurityRevoke, h.revokeToken))
+	mux.HandleFunc("GET /v1/artifacts/{artifactID}", h.protected(access.ActionArtifactRead, h.getArtifact))
+	mux.HandleFunc("GET /v1/artifacts/{artifactID}/content", h.protected(access.ActionArtifactRead, h.getArtifactContent))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/push", h.push)
 	return mux
+}
+
+func (h *HTTPHandler) getArtifact(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	object, err := h.Service.GetArtifact(r.Context(), tenantID, r.PathValue("artifactID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, object)
+}
+
+func (h *HTTPHandler) getArtifactContent(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Service.Artifacts == nil {
+		h.writeError(w, errors.New("artifact object storage is not configured"))
+		return
+	}
+	reader, object, err := h.Service.Artifacts.Open(r.Context(), tenantID, r.PathValue("artifactID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	defer reader.Close()
+	w.Header().Set("Content-Type", object.DetectedMediaType)
+	w.Header().Set("Content-Length", strconv.FormatInt(object.SizeBytes, 10))
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if object.Filename != "" {
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": object.Filename}))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, reader)
+}
+
+func (h *HTTPHandler) revokeToken(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	var input RevokeTokenInput
+	if !h.decodeJSON(w, r, &input) {
+		return
+	}
+	revocation, err := h.Service.RevokeToken(r.Context(), tenantID, input)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, revocation)
 }
 
 func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) http.HandlerFunc {
@@ -67,6 +128,9 @@ func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) htt
 		}
 		h.audit(r.Context(), audit)
 		resourceID := r.PathValue("taskID")
+		if resourceID == "" {
+			resourceID = r.PathValue("artifactID")
+		}
 		if err := h.Authorizer.Authorize(r.Context(), principal, access.Request{Action: action, ResourceID: resourceID}); err != nil {
 			audit.Decision = "authorization_denied"
 			audit.ResourceID = resourceID
@@ -331,6 +395,12 @@ func (h *HTTPHandler) writeError(w http.ResponseWriter, err error) {
 		status, category, code, message = http.StatusNotFound, "resource", "NOT_FOUND", "resource not found"
 	case errors.Is(err, core.ErrConflict):
 		status, category, code, message = http.StatusConflict, "state", "CONFLICT", "resource already exists"
+	case errors.Is(err, core.ErrQuotaExceeded):
+		status, category, code, message = http.StatusTooManyRequests, "quota", "ARTIFACT_QUOTA_EXCEEDED", "tenant Artifact quota is exhausted"
+	case errors.Is(err, artifactstore.ErrUnavailable):
+		status, category, code, message = http.StatusNotFound, "resource", "ARTIFACT_UNAVAILABLE", "Artifact content is unavailable"
+	case errors.Is(err, artifactstore.ErrPolicy):
+		status, category, code, message = http.StatusUnprocessableEntity, "validation", "ARTIFACT_POLICY_REJECTED", "Artifact content violates policy"
 	case errors.Is(err, ErrInvalidPushCredential):
 		status, category, code, message = http.StatusUnauthorized, "authentication", "INVALID_PUSH_CREDENTIAL", "Push credential is invalid"
 	case errors.Is(err, ErrPushTaskMismatch):

@@ -4,7 +4,7 @@
 
 Agent Federation Hub 是一个面向跨领域、跨组织 Agent 协作的研究型开源项目。它的目标不是替某个业务内部编排所有 Agent，而是探索如何让独立部署、使用不同框架、拥有不同权限边界的 Agent 系统，通过可发现、可认证、可观测、可恢复的协议协作完成一项任务。
 
-> 当前状态：A2A 协议与开源生态研究基线已完整导入；仓库已有 A2A `1.0` JSON-RPC/SSE 互操作基线、可信 Principal/Scope 边界、可替换 SecretProvider、PostgreSQL 事务存储、多实例工作租约、持久 Push inbox 和基于已提交 Event 的连续 SSE。JWT 当前使用静态 PEM 公钥，动态 OIDC/JWKS、限流、外部 Artifact 对象存储、备份/HA 验证以及协议对齐的完整 Inspector/TCK 仍未完成；本地 journal 仍只适合单进程开发。
+> 当前状态：A2A 协议与开源生态研究基线已完整导入；仓库已有 A2A `1.0` JSON-RPC/SSE 互操作基线、动态 OIDC/JWKS、SPIFFE mTLS、外部策略与 RFC 8693 Token Exchange 边界、PostgreSQL 多实例租约和持久 Push inbox。A2A Raw/URL Artifact 已接入带大小/MIME/扫描/配额/生命周期控制的文件系统或 S3/MinIO 对象数据面。真实合作方 IdP/CA/PDP 联调、限流、持久审计、备份/HA 验证以及协议对齐的完整 Inspector/TCK 仍未完成；本地 journal 和文件系统对象存储仍只适合单进程开发。
 
 ## 设计方向
 
@@ -36,6 +36,8 @@ A2A Protocol
 | [`docs/architecture/phase-one-hub-conformance-boundary.md`](docs/architecture/phase-one-hub-conformance-boundary.md) | Hub、Push、TCK、Registry/Gateway 与 AAMP 的当前能力边界 |
 | [`docs/adr/0003-authenticated-principal-and-policy-boundary.md`](docs/adr/0003-authenticated-principal-and-policy-boundary.md) | 已实现的认证 Principal、授权、审计和 SecretProvider 边界 |
 | [`docs/adr/0004-postgresql-leased-background-execution.md`](docs/adr/0004-postgresql-leased-background-execution.md) | PostgreSQL 事务、多实例租约与持久 Push inbox 决策 |
+| [`docs/adr/0005-federated-workload-trust.md`](docs/adr/0005-federated-workload-trust.md) | OIDC、SPIFFE mTLS、外部策略、令牌交换与撤销边界 |
+| [`docs/adr/0006-artifact-object-data-plane.md`](docs/adr/0006-artifact-object-data-plane.md) | Artifact 对象存储、内容策略、扫描、配额与生命周期决策 |
 
 通用 A2A 协议和跨项目研究以 `agent-systems-study` 为权威来源，本仓库保留可追溯的完整快照并按来源 commit 单向同步；本项目自身的架构、ADR、规格、实现和测试只在本仓库演进。
 
@@ -47,7 +49,7 @@ A2A Protocol
 
 - **Phase 0：协议基线与一致性验证**：已选择 A2A `1.0` JSON-RPC/SSE 初始 Profile，并完成自有 Go/Python 互操作与契约测试；与所选协议修订一致的完整 Inspector/TCK 仍待完成。
 - **Phase 1：最小互操作样例**：首个 Go Hub 服务切片已实现内置 Agent Card 注册、持久任务日志、可恢复事件流、取消、对账、租户隔离和 Push 接收；分布式与生产加固不在当前完成声明内。
-- **Phase 2：异步与治理**：已实现首版 JWT Principal、Scope 授权、结构化审计、SecretProvider、PostgreSQL 租约后台对账和持久 Push inbox；动态身份联盟、限流、AAMP 传输和人工审批仍待实现。
+- **Phase 2：异步与治理**：已实现动态 OIDC/JWKS、SPIFFE mTLS、外部策略、令牌交换/撤销、PostgreSQL 租约后台对账、持久 Push inbox，以及经 PostgreSQL 17 与 MinIO 验证的 Artifact 数据面；真实信任服务联调、限流、持久审计、AAMP 传输和人工审批仍待实现。
 - **Phase 3：多场景验证**：用正交场景验证同一核心是否能复用。
 
 ## 许可证与实现承诺

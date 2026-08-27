@@ -75,9 +75,25 @@ completion status, and ordered Parts. A Part has one of three kinds:
 
 An Artifact update replaces the current Artifact unless the adapter marks it as
 append. Append adds Parts while preserving later completion metadata. Artifact
-content remains untrusted input; malware scanning, external URI fetching,
-retention, encryption, and tenant quotas are production gates not implemented by
-this contract.
+content remains untrusted input. Before a raw or URL file Part enters a Task or
+Event, the Hub streams it through a size limit, MIME detection/allowlist, tenant
+quota reservation, and malware scanner into a replaceable filesystem or
+S3-compatible object store. Text and structured data remain inline. File Parts
+retain only `objectId`, `sizeBytes`, `sha256`, detected media type, and filename;
+base64 bytes and provider URLs are cleared.
+
+Object identity includes the tenant, local Task, provider Artifact, observation
+deduplication key, Part position, and content digest. Replaying the same A2A
+observation therefore returns the existing metadata without double charging
+quota. PostgreSQL rows and the journal contain metadata only, never object bytes.
+
+Remote URI retrieval permits HTTPS targets only and applies DNS/IP pinning,
+private and reserved address rejection, redirect revalidation, timeout, and byte
+limits. Query and fragment components are not retained. Scanner failure releases
+the reservation; infected content is quarantined and never downloadable. Only
+an authenticated tenant Principal with `artifacts:read` may read metadata or
+`AVAILABLE` content. Leased lifecycle workers delete expired objects and release
+quota across Hub instances.
 
 ## Reconciliation and Cancellation
 
@@ -114,8 +130,11 @@ duplicate suppression, forced stream failure with and without a remote Task ID,
 restart reconciliation, late-state protection, exact A2A version selection,
 declared credential requirements, JWT and scope failures, audit redaction,
 sanitized error categories, tenant isolation, Push token/payload/inbox controls,
-leases and worker heartbeat, and AAMP lifecycle mapping. PostgreSQL 17 integration
-tests add transaction rollback and real two-connection-pool exclusion evidence.
+leases and worker heartbeat, AAMP lifecycle mapping, Artifact externalization,
+content policy, scanning, quarantine, quota, URI controls, and tenant-scoped
+downloads. PostgreSQL 17 integration tests add transaction rollback and real
+two-connection-pool Task/Artifact lease exclusion; MinIO integration performs
+actual S3-compatible object operations.
 
 See [`internal/core/store_test.go`](../../internal/core/store_test.go),
 [`internal/hub/service_test.go`](../../internal/hub/service_test.go),

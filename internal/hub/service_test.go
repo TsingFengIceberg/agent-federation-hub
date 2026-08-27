@@ -2,7 +2,9 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"io"
 	"iter"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
@@ -331,6 +334,65 @@ func TestArtifactOnlyObservationDoesNotClearTaskState(t *testing.T) {
 	}
 	if task.State != core.TaskStateWorking || len(task.Artifacts) != 1 {
 		t.Fatalf("artifact observation changed task incorrectly: %+v", task)
+	}
+}
+
+func TestRawArtifactIsExternalizedBeforeTaskMutation(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	objects, err := artifactstore.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeAdapter{
+		descriptor: federation.Descriptor{Name: "agent", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
+		send: func(context.Context, core.Agent, federation.Message) iter.Seq2[federation.Observation, error] {
+			return sequence(federation.Observation{
+				DedupKey: "completed-with-file", Source: "a2a", RemoteTaskID: "remote-1", State: core.TaskStateCompleted,
+				Artifacts: []federation.ArtifactUpdate{{Artifact: core.Artifact{
+					ID: "artifact-1", Complete: true, Parts: []core.Part{{
+						Kind: core.PartFile, MediaType: "text/plain", Filename: "result.txt",
+						BytesBase64: base64.StdEncoding.EncodeToString([]byte("externalized result")),
+					}},
+				}}},
+			})
+		},
+	}
+	service := newTestService(t, store, adapter)
+	service.Artifacts = &artifactstore.Service{
+		Metadata: store, Objects: objects, Scanner: artifactstore.NoopScanner{},
+		Policy: artifactstore.Policy{
+			MaxBytes: 1024, AllowedMIME: map[string]struct{}{"text/plain": {}},
+			Quota: artifactstore.Quota{MaxBytes: 1024, MaxObjects: 10}, Retention: time.Hour,
+		},
+		Now: service.Now,
+	}
+	registerTestAgent(t, service, "tenant-a")
+	task, err := service.SubmitTask(context.Background(), "tenant-a", SubmitTaskInput{AgentID: "agent-1", Text: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := task.Artifacts[0].Parts[0]
+	if part.ObjectID == "" || part.BytesBase64 != "" || part.URI != "" || part.SHA256 == "" || part.SizeBytes != int64(len("externalized result")) {
+		t.Fatalf("Task retained inline Artifact bytes: %+v", part)
+	}
+	reader, _, err := service.Artifacts.Open(context.Background(), "tenant-a", part.ObjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	payload, _ := io.ReadAll(reader)
+	if string(payload) != "externalized result" {
+		t.Fatalf("object payload=%q", payload)
+	}
+	storedEvents, err := store.EventsAfter(context.Background(), "tenant-a", task.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range storedEvents {
+		if event.Artifact != nil && event.Artifact.Parts[0].BytesBase64 != "" {
+			t.Fatal("Event retained inline Artifact bytes")
+		}
 	}
 }
 

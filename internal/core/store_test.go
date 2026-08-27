@@ -185,3 +185,86 @@ func TestJournalWorkLeaseExclusionExpiryAndRetrySchedule(t *testing.T) {
 		t.Fatalf("scheduled retry=%+v err=%v", retried, err)
 	}
 }
+
+func TestJournalTokenRevocationExpiry(t *testing.T) {
+	store, err := OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	revocation := TokenRevocation{
+		Issuer: "https://issuer.example", TokenID: "token-1", TenantID: "tenant-a",
+		RevokedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	if err := store.RevokeToken(context.Background(), revocation); err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := store.TokenRevoked(context.Background(), revocation.Issuer, revocation.TokenID, revocation.TenantID, now)
+	if err != nil || !revoked {
+		t.Fatalf("revoked=%v err=%v", revoked, err)
+	}
+	removed, err := store.PruneRevocations(context.Background(), now.Add(time.Hour))
+	if err != nil || removed != 1 {
+		t.Fatalf("removed=%d err=%v", removed, err)
+	}
+	revoked, err = store.TokenRevoked(context.Background(), revocation.Issuer, revocation.TokenID, revocation.TenantID, now.Add(time.Hour))
+	if err != nil || revoked {
+		t.Fatalf("expired revocation active=%v err=%v", revoked, err)
+	}
+}
+
+func TestJournalArtifactQuotaReplayAndDeletionLease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.journal")
+	store, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	object := ArtifactObject{
+		ID: "object-1", TenantID: "tenant-a", TaskID: "task-a", ArtifactID: "artifact-a",
+		SHA256: "digest", SizeBytes: 10, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	reserved, created, err := store.ReserveArtifact(context.Background(), object, ArtifactQuota{MaxBytes: 10, MaxObjects: 1})
+	if err != nil || !created || reserved.Status != ArtifactObjectPending {
+		t.Fatalf("reserve=%+v created=%v err=%v", reserved, created, err)
+	}
+	if _, _, err := store.ReserveArtifact(context.Background(), ArtifactObject{
+		ID: "object-2", TenantID: "tenant-a", TaskID: "task-a", ArtifactID: "artifact-a",
+		SHA256: "other", SizeBytes: 1, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}, ArtifactQuota{MaxBytes: 10, MaxObjects: 1}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("quota error=%v", err)
+	}
+	if _, err := store.FinalizeArtifact(
+		context.Background(), object.TenantID, object.ID, "aa/object", "text/plain",
+		ArtifactScanClean, ArtifactObjectAvailable, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	usage, err := store.GetArtifactUsage(context.Background(), object.TenantID)
+	if err != nil || usage.Bytes != 10 || usage.Objects != 1 {
+		t.Fatalf("replayed usage=%+v err=%v", usage, err)
+	}
+	leases, err := store.ClaimExpiredArtifacts(context.Background(), "worker-a", 1, now.Add(2*time.Hour), time.Minute)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("leases=%+v err=%v", leases, err)
+	}
+	if second, err := store.ClaimExpiredArtifacts(context.Background(), "worker-b", 1, now.Add(2*time.Hour), time.Minute); err != nil || len(second) != 0 {
+		t.Fatalf("duplicate leases=%+v err=%v", second, err)
+	}
+	if err := store.CompleteArtifactDeletion(context.Background(), leases[0], now.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	usage, _ = store.GetArtifactUsage(context.Background(), object.TenantID)
+	if usage.Bytes != 0 || usage.Objects != 0 {
+		t.Fatalf("completed deletion usage=%+v", usage)
+	}
+}

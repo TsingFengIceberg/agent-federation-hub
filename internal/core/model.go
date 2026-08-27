@@ -52,6 +52,9 @@ type Part struct {
 	BytesBase64 string   `json:"bytesBase64,omitempty"`
 	URI         string   `json:"uri,omitempty"`
 	Data        any      `json:"data,omitempty"`
+	ObjectID    string   `json:"objectId,omitempty"`
+	SizeBytes   int64    `json:"sizeBytes,omitempty"`
+	SHA256      string   `json:"sha256,omitempty"`
 }
 
 type Artifact struct {
@@ -140,6 +143,75 @@ type InboxLease struct {
 	Owner     string    `json:"owner"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	Attempt   uint32    `json:"attempt"`
+}
+
+type TokenRevocation struct {
+	Issuer    string    `json:"issuer"`
+	TokenID   string    `json:"tokenId"`
+	TenantID  string    `json:"tenantId"`
+	Reason    string    `json:"reason,omitempty"`
+	RevokedAt time.Time `json:"revokedAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+type ArtifactObjectStatus string
+
+const (
+	ArtifactObjectPending     ArtifactObjectStatus = "PENDING"
+	ArtifactObjectAvailable   ArtifactObjectStatus = "AVAILABLE"
+	ArtifactObjectQuarantined ArtifactObjectStatus = "QUARANTINED"
+	ArtifactObjectFailed      ArtifactObjectStatus = "FAILED"
+	ArtifactObjectDeleting    ArtifactObjectStatus = "DELETING"
+	ArtifactObjectDeleted     ArtifactObjectStatus = "DELETED"
+)
+
+type ArtifactScanStatus string
+
+const (
+	ArtifactScanClean      ArtifactScanStatus = "CLEAN"
+	ArtifactScanInfected   ArtifactScanStatus = "INFECTED"
+	ArtifactScanError      ArtifactScanStatus = "ERROR"
+	ArtifactScanNotScanned ArtifactScanStatus = "NOT_SCANNED"
+)
+
+type ArtifactObject struct {
+	ID                string               `json:"id"`
+	TenantID          string               `json:"tenantId"`
+	TaskID            string               `json:"taskId"`
+	ArtifactID        string               `json:"artifactId"`
+	PartIndex         int                  `json:"partIndex"`
+	StorageKey        string               `json:"-"`
+	SHA256            string               `json:"sha256"`
+	SizeBytes         int64                `json:"sizeBytes"`
+	DeclaredMediaType string               `json:"declaredMediaType,omitempty"`
+	DetectedMediaType string               `json:"detectedMediaType"`
+	Filename          string               `json:"filename,omitempty"`
+	SourceURI         string               `json:"sourceUri,omitempty"`
+	Status            ArtifactObjectStatus `json:"status"`
+	ScanStatus        ArtifactScanStatus   `json:"scanStatus"`
+	CreatedAt         time.Time            `json:"createdAt"`
+	UpdatedAt         time.Time            `json:"updatedAt"`
+	ExpiresAt         time.Time            `json:"expiresAt"`
+	DeletedAt         *time.Time           `json:"deletedAt,omitempty"`
+	FailureCode       string               `json:"failureCode,omitempty"`
+}
+
+type ArtifactQuota struct {
+	MaxBytes   int64 `json:"maxBytes"`
+	MaxObjects int64 `json:"maxObjects"`
+}
+
+type ArtifactUsage struct {
+	TenantID string `json:"tenantId"`
+	Bytes    int64  `json:"bytes"`
+	Objects  int64  `json:"objects"`
+}
+
+type ArtifactDeletionLease struct {
+	Object    ArtifactObject `json:"object"`
+	Owner     string         `json:"owner"`
+	ExpiresAt time.Time      `json:"expiresAt"`
+	Attempt   uint32         `json:"attempt"`
 }
 
 type Event struct {

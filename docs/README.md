@@ -13,6 +13,8 @@
 | [`adr/0002-durable-federation-task-reconciliation.md`](adr/0002-durable-federation-task-reconciliation.md) | Durable observable-state and ambiguous-delivery recovery rules | accepted for initial slice |
 | [`adr/0003-authenticated-principal-and-policy-boundary.md`](adr/0003-authenticated-principal-and-policy-boundary.md) | Authenticated Principal, policy, audit, and SecretProvider boundary | accepted / implemented initial boundary |
 | [`adr/0004-postgresql-leased-background-execution.md`](adr/0004-postgresql-leased-background-execution.md) | PostgreSQL transactions, multi-instance leases, and durable Push inbox | accepted / PostgreSQL 17 integration-tested |
+| [`adr/0005-federated-workload-trust.md`](adr/0005-federated-workload-trust.md) | Dynamic OIDC/JWKS, SPIFFE mTLS, external policy, token exchange, and revocation | accepted / deterministic tests |
+| [`adr/0006-artifact-object-data-plane.md`](adr/0006-artifact-object-data-plane.md) | External object storage, content policy, scanning, quota, and lifecycle boundary | accepted / PostgreSQL and MinIO integration-tested |
 | [`specifications/task-event-artifact-contract.md`](specifications/task-event-artifact-contract.md) | Implemented normalized Task, Event, Artifact, tenancy, and recovery contract | verified local implementation |
 | [`specifications/access-control-contract.md`](specifications/access-control-contract.md) | Principal fields and management API Action-to-scope mapping | implemented initial contract |
 

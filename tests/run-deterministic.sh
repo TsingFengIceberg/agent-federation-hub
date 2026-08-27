@@ -11,3 +11,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ ${AFH_RUN_POSTGRES_TESTS:-0} == 1 ]]; then
   "$repo_root/tests/postgres/run-integration.sh"
 fi
+
+if [[ ${AFH_RUN_MINIO_TESTS:-0} == 1 ]]; then
+  "$repo_root/tests/minio/run-integration.sh"
+fi

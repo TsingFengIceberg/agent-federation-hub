@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
+	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 )
@@ -172,6 +173,43 @@ func TestHTTPFollowStreamReadsOnlyCommittedEvents(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, "id: 2\n") || !strings.Contains(body, `"state":"COMPLETED"`) {
 		t.Fatalf("follow stream did not deliver committed completion: %s", body)
+	}
+}
+
+func TestHTTPArtifactContentIsTenantScoped(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	objects, err := artifactstore.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	artifacts := &artifactstore.Service{
+		Metadata: store, Objects: objects, Scanner: artifactstore.NoopScanner{},
+		Policy: artifactstore.Policy{
+			MaxBytes: 1024, AllowedMIME: map[string]struct{}{"text/plain": {}},
+			Quota: artifactstore.Quota{MaxBytes: 1024, MaxObjects: 10}, Retention: time.Hour,
+		},
+		Now: func() time.Time { return now },
+	}
+	object, err := artifacts.Ingest(context.Background(), artifactstore.Input{
+		TenantID: "tenant-a", TaskID: "task-a", ArtifactID: "artifact-a",
+		DedupKey: "http", PartIndex: 0, MediaType: "text/plain", Filename: "result.txt",
+	}, strings.NewReader("downloadable result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newTestService(t, store, &fakeAdapter{})
+	service.Artifacts = artifacts
+	handler := testHTTPHandler(service, nil, 0)
+	response := request(t, handler, http.MethodGet, "/v1/artifacts/"+object.ID+"/content", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || response.Body.String() != "downloadable result" ||
+		response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("content status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/v1/artifacts/"+object.ID, "", "tenant-b", nil)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant Artifact status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

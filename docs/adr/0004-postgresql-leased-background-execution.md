@@ -44,9 +44,9 @@ on the process that accepted the original request.
   online rollout policy, and downgrade procedures remain open.
 - Database backup/restore drills, encryption-at-rest verification, retention,
   compaction, metrics, alerting, and multi-node HA acceptance tests remain open.
-- Artifact bytes still use the initial Task model. A replaceable object store and
-  large-object policy must be implemented before accepting production-scale
-  binary Artifacts.
+- Artifact metadata, tenant quota, and lifecycle leases now use PostgreSQL row
+  locks and `SKIP LOCKED`; object bytes remain outside PostgreSQL as specified in
+  [ADR 0006](0006-artifact-object-data-plane.md).
 
 ## Evidence
 
