@@ -15,7 +15,9 @@ PostgreSQL/object-storage environment.
   the database before migrations, and `GET /readyz` repeats a bounded health
   check so an instance can be removed from service when its store is unavailable.
 - The Journal backend is a single-process development fallback. Its backup is
-  fsynced, atomically installed, and replay-validated before restore.
+  fsynced, atomically installed, and replay-validated before restore. The
+  optional `BackupWithManifest` API records a SHA-256 digest so off-host copy
+  corruption is detected before restore.
 - `GET /healthz` is a liveness probe and does not assert database availability;
   `GET /readyz` is the traffic admission probe and returns `503` on a failed
   dependency check.
@@ -46,6 +48,21 @@ PostgreSQL/object-storage environment.
    dead-letter retention, and object deletion recovery.
 5. Connect metrics and audit signals to alerts with bounded labels; local
    process counters alone are not an HA monitoring solution.
+
+For an offline Journal operation, stop the Hub and use the repository-owned
+command:
+
+```bash
+go run ./cmd/journal-ops --mode backup \
+  --journal /var/lib/afh/hub.journal \
+  --destination /var/backups/hub.journal \
+  --manifest /var/backups/hub.journal.manifest.json
+
+go run ./cmd/journal-ops --mode restore \
+  --backup /var/backups/hub.journal \
+  --manifest /var/backups/hub.journal.manifest.json \
+  --destination /var/lib/afh/hub.journal
+```
 
 These gates are deployment tests, not claims implied by the local Docker
 smokes. The Hub currently provides the application contracts and test hooks;

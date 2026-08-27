@@ -3,6 +3,7 @@ package artifact
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -95,4 +96,18 @@ func (s *S3Store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	return s.client.RemoveObject(ctx, s.bucket, name, minio.RemoveObjectOptions{})
+}
+
+func (s *S3Store) Health(ctx context.Context) error {
+	if s == nil || s.client == nil || s.bucket == "" {
+		return errors.New("S3 object store is not initialized")
+	}
+	exists, err := s.client.BucketExists(ctx, s.bucket)
+	if err != nil {
+		return fmt.Errorf("check S3 bucket: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("S3 bucket %q does not exist", s.bucket)
+	}
+	return nil
 }

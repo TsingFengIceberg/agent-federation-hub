@@ -171,6 +171,9 @@ func TestFileStoreRejectsArbitraryKeysAndExactSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Health(context.Background()); err != nil {
+		t.Fatalf("filesystem health: %v", err)
+	}
 	if err := store.Put(context.Background(), "../escape", bytes.NewReader(nil), 0, ""); err == nil {
 		t.Fatal("arbitrary object key was accepted")
 	}

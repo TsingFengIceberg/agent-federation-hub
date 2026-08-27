@@ -33,6 +33,9 @@ func TestS3CompatibleObjectStore(t *testing.T) {
 			t.Fatalf("create bucket: %v (exists error: %v)", err, existsErr)
 		}
 	}
+	if err := store.Health(ctx); err != nil {
+		t.Fatalf("S3 health: %v", err)
+	}
 	key := "aa/" + strings.Repeat("b", 64)
 	payload := "S3-compatible Artifact"
 	if err := store.Put(ctx, key, strings.NewReader(payload), int64(len(payload)), "text/plain"); err != nil {

@@ -220,7 +220,15 @@ func main() {
 		if !ok {
 			return errors.New("configured store does not expose a health check")
 		}
-		return healthStore.Health(ctx)
+		if err := healthStore.Health(ctx); err != nil {
+			return err
+		}
+		if objectHealth, ok := artifacts.Objects.(artifactstore.HealthStore); ok {
+			if err := objectHealth.Health(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	handler := (&hub.HTTPHandler{
 		Service: service, DecodePush: a2afederation.DecodePush,

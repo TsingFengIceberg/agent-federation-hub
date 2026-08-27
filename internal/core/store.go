@@ -3,6 +3,8 @@ package core
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -166,6 +169,13 @@ type JournalStore struct {
 	artifactLeases  map[string]artifactLeaseState
 }
 
+type JournalBackupManifest struct {
+	Version   int       `json:"version"`
+	SizeBytes int64     `json:"sizeBytes"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // Backup writes a point-in-time copy of the append-only journal. The snapshot
 // is fsynced and atomically renamed, so a restart can safely replay it even if
 // the process is interrupted during the copy.
@@ -215,6 +225,36 @@ func (s *JournalStore) Backup(destination string) error {
 	}
 	if err := os.Rename(temporaryPath, destination); err != nil {
 		return fmt.Errorf("install journal backup: %w", err)
+	}
+	return nil
+}
+
+// BackupWithManifest writes a Journal snapshot and an atomic checksum manifest
+// for operators copying backups to off-host storage. The manifest covers the
+// installed snapshot bytes, not the live Journal after the copy completes.
+func (s *JournalStore) BackupWithManifest(destination, manifestDestination string) error {
+	if manifestDestination == "" {
+		return errors.New("journal backup manifest destination is required")
+	}
+	if err := s.Backup(destination); err != nil {
+		return err
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil {
+		return fmt.Errorf("read journal backup for manifest: %w", err)
+	}
+	digest := sha256.Sum256(contents)
+	manifest := JournalBackupManifest{
+		Version: 1, SizeBytes: int64(len(contents)),
+		SHA256: hex.EncodeToString(digest[:]), CreatedAt: time.Now().UTC(),
+	}
+	payload, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode journal backup manifest: %w", err)
+	}
+	payload = append(payload, '\n')
+	if err := writeAtomic0600(manifestDestination, payload); err != nil {
+		return fmt.Errorf("write journal backup manifest: %w", err)
 	}
 	return nil
 }
@@ -271,6 +311,64 @@ func RestoreJournalBackup(backup, destination string) error {
 		return fmt.Errorf("install journal restore: %w", err)
 	}
 	return nil
+}
+
+func RestoreJournalBackupWithManifest(backup, manifestPath, destination string) error {
+	if manifestPath == "" {
+		return errors.New("journal backup manifest is required")
+	}
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("read journal backup manifest: %w", err)
+	}
+	var manifest JournalBackupManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return fmt.Errorf("decode journal backup manifest: %w", err)
+	}
+	if manifest.Version != 1 || manifest.SizeBytes < 0 || len(manifest.SHA256) != sha256.Size*2 {
+		return errors.New("invalid journal backup manifest")
+	}
+	contents, err := os.ReadFile(backup)
+	if err != nil {
+		return fmt.Errorf("read journal backup for verification: %w", err)
+	}
+	if int64(len(contents)) != manifest.SizeBytes {
+		return fmt.Errorf("journal backup size mismatch: got %d, want %d", len(contents), manifest.SizeBytes)
+	}
+	digest := sha256.Sum256(contents)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), manifest.SHA256) {
+		return errors.New("journal backup checksum mismatch")
+	}
+	return RestoreJournalBackup(backup, destination)
+}
+
+func writeAtomic0600(destination string, payload []byte) error {
+	destination = filepath.Clean(destination)
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(destination), ".atomic-write-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(payload); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, destination)
 }
 
 func OpenJournal(path string) (*JournalStore, error) {

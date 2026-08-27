@@ -112,6 +112,7 @@ func TestJournalBackupAndRestoreAreReplayable(t *testing.T) {
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "source.journal")
 	backupPath := filepath.Join(directory, "backup", "hub.journal")
+	manifestPath := filepath.Join(directory, "backup", "hub.journal.manifest.json")
 	restoredPath := filepath.Join(directory, "restored", "hub.journal")
 	store, err := OpenJournal(sourcePath)
 	if err != nil {
@@ -124,13 +125,13 @@ func TestJournalBackupAndRestoreAreReplayable(t *testing.T) {
 	}, Event{Type: "task.status", State: TaskStateWorking, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Backup(backupPath); err != nil {
+	if err := store.BackupWithManifest(backupPath, manifestPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := RestoreJournalBackup(backupPath, restoredPath); err != nil {
+	if err := RestoreJournalBackupWithManifest(backupPath, manifestPath, restoredPath); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := OpenJournal(restoredPath)
@@ -144,6 +145,15 @@ func TestJournalBackupAndRestoreAreReplayable(t *testing.T) {
 	}
 	if info, err := os.Stat(backupPath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("backup permissions info=%v err=%v", info, err)
+	}
+	if info, err := os.Stat(manifestPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("manifest permissions info=%v err=%v", info, err)
+	}
+	if err := os.WriteFile(backupPath, []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreJournalBackupWithManifest(backupPath, manifestPath, filepath.Join(directory, "tampered.journal")); err == nil {
+		t.Fatal("tampered journal backup passed manifest verification")
 	}
 }
 

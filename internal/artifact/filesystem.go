@@ -114,6 +114,23 @@ func (s *FileStore) Delete(_ context.Context, key string) error {
 	return err
 }
 
+func (s *FileStore) Health(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil || s.root == "" {
+		return errors.New("artifact filesystem store is not initialized")
+	}
+	info, err := os.Stat(s.root)
+	if err != nil {
+		return fmt.Errorf("stat artifact filesystem root: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("artifact filesystem root is not a directory")
+	}
+	return nil
+}
+
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader
