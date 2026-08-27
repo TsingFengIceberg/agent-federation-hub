@@ -22,15 +22,9 @@
       "evidence": "docs/specifications/task-event-artifact-contract.md"
     },
     {
-      "id": "GO-SDK-SUBSCRIPTION-SEMANTICS",
-      "scope": "jsonrpc:STREAM-SUB-001,STREAM-SUB-002,STREAM-SUB-003,STREAM-SUB-004",
-      "reason": "The current Go SDK local execution manager does not expose the TCK's requested resubscription behavior for terminal, missing, and INPUT_REQUIRED tasks in this deterministic fixture.",
-      "evidence": "docs/architecture/a2a-v1-go-python-decision-gate.md"
-    },
-    {
-      "id": "TCK-HISTORY-AND-ERROR-MAPPING",
-      "scope": "jsonrpc:CORE-HIST-002,JSONRPC-SSE-002",
-      "reason": "History-length handling and malformed-content error mapping require alignment between the TCK's embedded protocol snapshot and the selected Go SDK binding behavior.",
+      "id": "PROFILE-UNTESTED-BINDINGS",
+      "scope": "grpc,http_json,card-signing,auth",
+      "reason": "The owned SUT advertises and runs only the selected JSON-RPC+SSE profile; other bindings and security capabilities remain outside this executable profile.",
       "evidence": "docs/architecture/a2a-v1-go-python-decision-gate.md"
     }
   ]

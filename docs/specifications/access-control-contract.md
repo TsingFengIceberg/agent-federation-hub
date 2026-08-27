@@ -66,9 +66,9 @@ contain decision metadata but exclude credentials and payloads.
   `Retry-After`; coordination-store failure fails closed.
 - Audit records can be written to an append-only `0600` JSONL file with an
   `fsync` per record and optionally fanned out to an HTTPS collector using a
-  SecretProvider-resolved bearer token. Local persistence remains the recovery
-  boundary when the collector is unavailable; this is not yet a central SIEM
-  qualification.
+  SecretProvider-resolved bearer token. Central export uses a bounded
+  exponential retry; local persistence remains the recovery boundary when the
+  collector is unavailable. This is not yet a central SIEM qualification.
 
 ## Current Gates
 

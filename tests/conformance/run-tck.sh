@@ -38,13 +38,52 @@ done
 curl --fail --silent "http://127.0.0.1:$port/.well-known/agent-card.json" >/dev/null
 
 mkdir -p "$report_dir"
+python_bin=${A2A_TCK_PYTHON:-.venv/bin/python}
+if [[ "$python_bin" != /* ]]; then
+  python_bin="$tck_dir/$python_bin"
+fi
+if [[ ! -x "$python_bin" ]]; then
+  python_bin=python3
+fi
 set +e
-(cd "$tck_dir" && python_bin=${A2A_TCK_PYTHON:-.venv/bin/python}; if [[ ! -x "$python_bin" ]]; then python_bin=python3; fi; "$python_bin" run_tck.py --sut-host "http://127.0.0.1:$port" --transport jsonrpc --level must)
+(cd "$tck_dir" && "$python_bin" run_tck.py --sut-host "http://127.0.0.1:$port" --transport jsonrpc --level must)
 tck_status=$?
 set -e
 
 report_file="$report_dir/owned-sut-result.json"
-cat >"$report_file" <<EOF
+compatibility_report="$tck_dir/reports/compatibility.json"
+if [[ -f "$compatibility_report" ]]; then
+  "$python_bin" - "$report_file" "$compatibility_report" "$tck_status" <<'PY'
+import json
+import sys
+
+output_path, compatibility_path, exit_code = sys.argv[1:]
+with open(compatibility_path, encoding="utf-8") as handle:
+    compatibility = json.load(handle)
+per_requirement = compatibility.get("per_requirement", {})
+status_counts = {}
+for entry in per_requirement.values():
+    status = entry.get("status", "UNKNOWN")
+    status_counts[status] = status_counts.get(status, 0) + 1
+result = {
+    "tckCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
+    "selectedProtocolCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
+    "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
+    "sut": "cmd/a2a-tck-sut",
+    "transport": "jsonrpc",
+    "requestedLevel": "must",
+    "exitCode": int(exit_code),
+    "waiverFile": "tests/conformance/tck-waivers.json",
+    "interpretedAs": "evidence-with-waivers-and-skips",
+    "compatibilitySummary": compatibility.get("summary", {}),
+    "requirementStatusCounts": status_counts,
+}
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump(result, handle, indent=2)
+    handle.write("\n")
+PY
+else
+  cat >"$report_file" <<EOF
 {
   "tckCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
   "selectedProtocolCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
@@ -54,9 +93,10 @@ cat >"$report_file" <<EOF
   "requestedLevel": "must",
   "exitCode": $tck_status,
   "waiverFile": "tests/conformance/tck-waivers.json",
-  "interpretedAs": "evidence-with-waivers"
+  "interpretedAs": "evidence-with-waivers-and-skips"
 }
 EOF
+fi
 
 printf 'Owned A2A TCK run exit code: %d\n' "$tck_status"
 printf 'Machine-readable result: %s\n' "$report_file"
