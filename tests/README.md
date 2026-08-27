@@ -8,10 +8,13 @@ The repository separates tests by the evidence they provide:
 | Layer | Entry point | External API | Purpose |
 |---|---|---|---|
 | Unit | [`run-unit.sh`](run-unit.sh) | no | Go invariants plus live-adapter configuration and parsing tests |
+| Hub contract | `go test ./internal/core ./internal/federation/... ./internal/hub` | no | Durable state, recovery, duplicate, auth, tenancy, Push, HTTP, and adapter boundaries |
+| Hub service smoke | [`hub/run-smoke.sh`](hub/run-smoke.sh) | no | Real Hub HTTP registration, A2A Task/Artifact exchange, and SSE replay against the Go fixture |
 | A2A interoperability | [`interop/run-smoke.sh`](interop/run-smoke.sh) | no | Go Hub probe against independent Go and Python A2A Agents |
 | Provider-adapter mock | [`real-api/run-mock-smoke.sh`](real-api/run-mock-smoke.sh) | no | Full A2A-to-provider path against a local compatible SSE endpoint |
 | Live provider | [`real-api/run-smoke.sh`](real-api/run-smoke.sh) | yes | End-to-end A2A Task and SSE behavior around a real model call |
-| Inspector/TCK | planned | no | Aligned protocol conformance and explained waivers |
+| Conformance pins | [`conformance/`](conformance/) | no | Machine-checked protocol/SDK/TCK revision and evidence status |
+| Inspector/TCK | unresolved revision alignment | no | Future aligned protocol conformance and explained waivers |
 
 The deterministic layers are the regression baseline and must not depend on
 network availability, provider quotas, model output wording, or paid APIs. The

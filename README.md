@@ -4,7 +4,7 @@
 
 Agent Federation Hub 是一个面向跨领域、跨组织 Agent 协作的研究型开源项目。它的目标不是替某个业务内部编排所有 Agent，而是探索如何让独立部署、使用不同框架、拥有不同权限边界的 Agent 系统，通过可发现、可认证、可观测、可恢复的协议协作完成一项任务。
 
-> 当前状态：A2A 协议与开源生态研究基线已完整导入；平台实现、A2A Inspector / TCK 一致性验证和具体技术选型仍待开展。导入的研究结论不等同于已经实现的产品能力。
+> 当前状态：A2A 协议与开源生态研究基线已完整导入；仓库已有 A2A `1.0` JSON-RPC/SSE 互操作基线和首个单进程 Hub 实现切片，覆盖 Agent Card 注册、租户隔离、持久 Task/Event/Artifact、断线与重启对账、取消和受限 Push 接收。协议对齐的完整 Inspector/TCK 验证、分布式存储、生产身份与具体部署选型仍未完成。
 
 ## 设计方向
 
@@ -32,6 +32,8 @@ A2A Protocol
 | [`docs/README.md`](docs/README.md) | 正式文档总入口和文档所有权边界 |
 | [`docs/research/a2a-study/`](docs/research/a2a-study/) | 从 `agent-systems-study` 固定 commit 完整导入的 A2A 研究快照 |
 | [`submodules/`](submodules/) | A2A、AAMP、Registry、Gateway、Runtime 与示例项目的固定源码版本 |
+| [`docs/specifications/task-event-artifact-contract.md`](docs/specifications/task-event-artifact-contract.md) | 已实现的首版联邦 Task、Event 与 Artifact 契约 |
+| [`docs/architecture/phase-one-hub-conformance-boundary.md`](docs/architecture/phase-one-hub-conformance-boundary.md) | Hub、Push、TCK、Registry/Gateway 与 AAMP 的当前能力边界 |
 
 通用 A2A 协议和跨项目研究以 `agent-systems-study` 为权威来源，本仓库保留可追溯的完整快照并按来源 commit 单向同步；本项目自身的架构、ADR、规格、实现和测试只在本仓库演进。
 
@@ -41,8 +43,8 @@ A2A Protocol
 
 ## 项目阶段
 
-- **Phase 0：协议基线与一致性验证**：研究笔记已导入；下一步确定初始 A2A 版本与 Binding Profile，并用 Inspector / TCK 和最小契约测试核验实现理解。
-- **Phase 1：最小互操作样例**：实现一个 A2A Client、Server、Registry 和可观测任务流。
+- **Phase 0：协议基线与一致性验证**：已选择 A2A `1.0` JSON-RPC/SSE 初始 Profile，并完成自有 Go/Python 互操作与契约测试；与所选协议修订一致的完整 Inspector/TCK 仍待完成。
+- **Phase 1：最小互操作样例**：首个 Go Hub 服务切片已实现内置 Agent Card 注册、持久任务日志、可恢复事件流、取消、对账、租户隔离和 Push 接收；分布式与生产加固不在当前完成声明内。
 - **Phase 2：异步与治理**：加入 AAMP 适配器、委托身份、租户、审计、重试和人工审批。
 - **Phase 3：多场景验证**：用正交场景验证同一核心是否能复用。
 

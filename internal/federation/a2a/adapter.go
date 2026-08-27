@@ -1,0 +1,380 @@
+package a2afederation
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"iter"
+	"net/http"
+	"os"
+	"sort"
+	"time"
+
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+)
+
+type Adapter struct {
+	resolver        *agentcard.Resolver
+	transportClient *http.Client
+}
+
+func New(timeout time.Duration) *Adapter {
+	client := &http.Client{Timeout: timeout}
+	return &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client}
+}
+
+func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Descriptor, error) {
+	card, err := a.resolver.Resolve(ctx, cardURL)
+	if err != nil {
+		return federation.Descriptor{}, mapError(err, false)
+	}
+	endpoint, err := selectEndpoint(card)
+	if err != nil {
+		return federation.Descriptor{}, err
+	}
+	schemes := make([]string, 0, len(card.SecuritySchemes))
+	for name := range card.SecuritySchemes {
+		schemes = append(schemes, string(name))
+	}
+	sort.Strings(schemes)
+	return federation.Descriptor{
+		Name: card.Name, ProviderVersion: card.Version,
+		ProtocolBinding: string(endpoint.ProtocolBinding),
+		ProtocolVersion: string(endpoint.ProtocolVersion), Endpoint: endpoint.URL,
+		Streaming:         card.Capabilities.Streaming,
+		PushNotifications: card.Capabilities.PushNotifications,
+		SecuritySchemes:   schemes,
+	}, nil
+}
+
+func selectEndpoint(card *a2a.AgentCard) (*a2a.AgentInterface, error) {
+	for _, endpoint := range card.SupportedInterfaces {
+		if endpoint.ProtocolBinding == a2a.TransportProtocolJSONRPC &&
+			endpoint.ProtocolVersion == a2a.Version {
+			return endpoint, nil
+		}
+	}
+	return nil, &federation.Error{Problem: core.Problem{
+		Category: "protocol", Code: "VERSION_NOT_SUPPORTED",
+		Message: "Agent Card has no JSONRPC interface with protocol version 1.0",
+	}, Cause: a2a.ErrVersionNotSupported}
+}
+
+func (a *Adapter) client(ctx context.Context, agent core.Agent) (*a2aclient.Client, context.Context, error) {
+	card, err := a.resolver.Resolve(ctx, agent.CardURL)
+	if err != nil {
+		return nil, ctx, mapError(err, false)
+	}
+	endpoint, err := selectEndpoint(card)
+	if err != nil {
+		return nil, ctx, err
+	}
+	if endpoint.URL != agent.Endpoint || string(endpoint.ProtocolBinding) != agent.ProtocolBinding ||
+		string(endpoint.ProtocolVersion) != agent.ProtocolVersion {
+		return nil, ctx, &federation.Error{Problem: core.Problem{
+			Category: "protocol", Code: "AGENT_INTERFACE_CHANGED",
+			Message: "Agent Card interface changed after registration",
+		}}
+	}
+
+	credentials := a2aclient.NewInMemoryCredentialsStore()
+	sessionID := a2aclient.SessionID(agent.ID)
+	for scheme, envName := range agent.CredentialEnv {
+		value := os.Getenv(envName)
+		if value != "" {
+			credentials.Set(sessionID, a2a.SecuritySchemeName(scheme), a2aclient.AuthCredential(value))
+		}
+	}
+	if err := validateCredentials(ctx, card, credentials, sessionID); err != nil {
+		return nil, ctx, err
+	}
+
+	client, err := a2aclient.NewFromCard(
+		ctx,
+		card,
+		a2aclient.WithDefaultsDisabled(),
+		a2aclient.WithJSONRPCTransport(a.transportClient),
+		a2aclient.WithConfig(a2aclient.Config{
+			PreferredTransports:      []a2a.TransportProtocol{a2a.TransportProtocolJSONRPC},
+			DisableTenantPropagation: true,
+		}),
+		a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{Service: credentials}),
+	)
+	if err != nil {
+		return nil, ctx, mapError(err, false)
+	}
+	return client, a2aclient.AttachSessionID(ctx, sessionID), nil
+}
+
+func validateCredentials(
+	ctx context.Context,
+	card *a2a.AgentCard,
+	credentials a2aclient.CredentialsService,
+	sessionID a2aclient.SessionID,
+) error {
+	if len(card.SecurityRequirements) == 0 {
+		return nil
+	}
+	sawSingleSchemeOption := false
+	for _, option := range card.SecurityRequirements {
+		if len(option) == 0 {
+			return nil
+		}
+		// The SDK interceptor currently emits one credential per call. Refuse an
+		// AND requirement instead of claiming authentication it cannot send.
+		if len(option) > 1 {
+			continue
+		}
+		sawSingleSchemeOption = true
+		for scheme := range option {
+			if _, err := credentials.Get(ctx, sessionID, scheme); err == nil {
+				return nil
+			}
+		}
+	}
+	if !sawSingleSchemeOption {
+		return &federation.Error{Problem: core.Problem{
+			Category: "protocol", Code: "COMPOUND_AUTH_NOT_SUPPORTED",
+			Message: "Agent Card requires a compound authentication scheme that this adapter cannot send",
+		}, Cause: a2a.ErrUnsupportedOperation}
+	}
+	return &federation.Error{Problem: core.Problem{
+		Category: "authentication", Code: "CREDENTIAL_REQUIRED",
+		Message: "Agent Card requires a credential that is not configured",
+	}, Cause: a2a.ErrUnauthenticated}
+}
+
+func (a *Adapter) Send(ctx context.Context, agent core.Agent, message federation.Message) iter.Seq2[federation.Observation, error] {
+	return func(yield func(federation.Observation, error) bool) {
+		client, callCtx, err := a.client(ctx, agent)
+		if err != nil {
+			yield(federation.Observation{}, err)
+			return
+		}
+		defer client.Destroy()
+		requestMessage := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(message.Text))
+		requestMessage.ID = message.ID
+		requestMessage.TaskID = a2a.TaskID(message.RemoteTaskID)
+		requestMessage.ContextID = message.RemoteContextID
+		config := &a2a.SendMessageConfig{
+			AcceptedOutputModes: []string{"text/plain", "application/json", "application/octet-stream"},
+			ReturnImmediately:   message.ReturnImmediately,
+		}
+		if message.Push != nil {
+			config.PushConfig = &a2a.PushConfig{
+				URL: message.Push.URL, Token: message.Push.Token,
+				Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: message.Push.Token},
+			}
+		}
+		request := &a2a.SendMessageRequest{Message: requestMessage, Config: config}
+		for event, eventErr := range client.SendStreamingMessage(callCtx, request) {
+			if eventErr != nil {
+				yield(federation.Observation{}, mapError(eventErr, true))
+				return
+			}
+			observation, convertErr := observationFromEvent(event)
+			if convertErr != nil {
+				yield(federation.Observation{}, convertErr)
+				return
+			}
+			if !yield(observation, nil) {
+				return
+			}
+		}
+	}
+}
+
+func DecodePush(payload []byte) (federation.Observation, error) {
+	var response a2a.StreamResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return federation.Observation{}, &federation.Error{Problem: core.Problem{
+			Category: "validation", Code: "INVALID_PUSH_PAYLOAD",
+			Message: "Push payload is not a valid A2A StreamResponse",
+		}, Cause: err}
+	}
+	return observationFromEvent(response.Event)
+}
+
+func (a *Adapter) Get(ctx context.Context, agent core.Agent, remoteTaskID string) (federation.Observation, error) {
+	client, callCtx, err := a.client(ctx, agent)
+	if err != nil {
+		return federation.Observation{}, err
+	}
+	defer client.Destroy()
+	task, err := client.GetTask(callCtx, &a2a.GetTaskRequest{ID: a2a.TaskID(remoteTaskID)})
+	if err != nil {
+		return federation.Observation{}, mapError(err, false)
+	}
+	return observationFromEvent(task)
+}
+
+func (a *Adapter) Cancel(ctx context.Context, agent core.Agent, remoteTaskID string) (federation.Observation, error) {
+	client, callCtx, err := a.client(ctx, agent)
+	if err != nil {
+		return federation.Observation{}, err
+	}
+	defer client.Destroy()
+	task, err := client.CancelTask(callCtx, &a2a.CancelTaskRequest{ID: a2a.TaskID(remoteTaskID)})
+	if err != nil {
+		return federation.Observation{}, mapError(err, false)
+	}
+	return observationFromEvent(task)
+}
+
+func (a *Adapter) Subscribe(ctx context.Context, agent core.Agent, remoteTaskID string) iter.Seq2[federation.Observation, error] {
+	return func(yield func(federation.Observation, error) bool) {
+		client, callCtx, err := a.client(ctx, agent)
+		if err != nil {
+			yield(federation.Observation{}, err)
+			return
+		}
+		defer client.Destroy()
+		request := &a2a.SubscribeToTaskRequest{ID: a2a.TaskID(remoteTaskID)}
+		for event, eventErr := range client.SubscribeToTask(callCtx, request) {
+			if eventErr != nil {
+				yield(federation.Observation{}, mapError(eventErr, true))
+				return
+			}
+			observation, convertErr := observationFromEvent(event)
+			if convertErr != nil {
+				yield(federation.Observation{}, convertErr)
+				return
+			}
+			if !yield(observation, nil) {
+				return
+			}
+		}
+	}
+}
+
+func observationFromEvent(event a2a.Event) (federation.Observation, error) {
+	observation := federation.Observation{
+		Source: "a2a", DedupKey: "a2a:" + core.DigestJSON(event), State: core.TaskStateUnknown,
+	}
+	switch value := event.(type) {
+	case *a2a.Message:
+		observation.State = core.TaskStateCompleted
+		observation.Final = true
+		observation.RemoteContextID = value.ContextID
+		observation.Artifacts = []federation.ArtifactUpdate{{Artifact: core.Artifact{
+			ID: "message:" + value.ID, Name: "direct-message",
+			Parts: convertParts(value.Parts), Complete: true,
+		}}}
+	case *a2a.Task:
+		observation.RemoteTaskID = string(value.ID)
+		observation.RemoteContextID = value.ContextID
+		observation.State = convertState(value.Status.State)
+		observation.Final = observation.State.Terminal()
+		observation.RemoteObservedAt = value.Status.Timestamp
+		for _, artifact := range value.Artifacts {
+			observation.Artifacts = append(observation.Artifacts, federation.ArtifactUpdate{
+				Artifact: convertArtifact(artifact, true),
+			})
+		}
+	case *a2a.TaskStatusUpdateEvent:
+		observation.RemoteTaskID = string(value.TaskID)
+		observation.RemoteContextID = value.ContextID
+		observation.State = convertState(value.Status.State)
+		observation.Final = observation.State.Terminal()
+		observation.RemoteObservedAt = value.Status.Timestamp
+	case *a2a.TaskArtifactUpdateEvent:
+		observation.RemoteTaskID = string(value.TaskID)
+		observation.RemoteContextID = value.ContextID
+		observation.Artifacts = []federation.ArtifactUpdate{{
+			Artifact: convertArtifact(value.Artifact, value.LastChunk), Append: value.Append,
+		}}
+	default:
+		return federation.Observation{}, &federation.Error{Problem: core.Problem{
+			Category: "protocol", Code: "INVALID_AGENT_RESPONSE",
+			Message: "remote Agent returned an unsupported event",
+		}, Cause: a2a.ErrInvalidAgentResponse}
+	}
+	return observation, nil
+}
+
+func convertArtifact(value *a2a.Artifact, complete bool) core.Artifact {
+	if value == nil {
+		return core.Artifact{ID: "missing", Complete: complete}
+	}
+	return core.Artifact{
+		ID: string(value.ID), Name: value.Name, Description: value.Description,
+		Parts: convertParts(value.Parts), Complete: complete,
+	}
+}
+
+func convertParts(parts a2a.ContentParts) []core.Part {
+	result := make([]core.Part, 0, len(parts))
+	for _, part := range parts {
+		converted := core.Part{MediaType: part.MediaType, Filename: part.Filename}
+		switch value := part.Content.(type) {
+		case a2a.Text:
+			converted.Kind = core.PartText
+			converted.Text = string(value)
+		case a2a.Raw:
+			converted.Kind = core.PartFile
+			converted.BytesBase64 = base64.StdEncoding.EncodeToString(value)
+		case a2a.URL:
+			converted.Kind = core.PartFile
+			converted.URI = string(value)
+		case a2a.Data:
+			converted.Kind = core.PartData
+			encoded, _ := json.Marshal(value.Value)
+			_ = json.Unmarshal(encoded, &converted.Data)
+		}
+		result = append(result, converted)
+	}
+	return result
+}
+
+func convertState(state a2a.TaskState) core.TaskState {
+	switch state {
+	case a2a.TaskStateSubmitted:
+		return core.TaskStateSubmitted
+	case a2a.TaskStateWorking:
+		return core.TaskStateWorking
+	case a2a.TaskStateInputRequired:
+		return core.TaskStateInputRequired
+	case a2a.TaskStateAuthRequired:
+		return core.TaskStateAuthRequired
+	case a2a.TaskStateCompleted:
+		return core.TaskStateCompleted
+	case a2a.TaskStateFailed:
+		return core.TaskStateFailed
+	case a2a.TaskStateCanceled:
+		return core.TaskStateCanceled
+	case a2a.TaskStateRejected:
+		return core.TaskStateRejected
+	default:
+		return core.TaskStateUnknown
+	}
+}
+
+func mapError(err error, ambiguous bool) error {
+	problem := core.Problem{
+		Category: "transport", Code: "REMOTE_TRANSPORT_ERROR",
+		Message: "remote Agent request failed", Retryable: true, Ambiguous: ambiguous,
+	}
+	switch {
+	case errors.Is(err, a2a.ErrVersionNotSupported):
+		problem = core.Problem{Category: "protocol", Code: "VERSION_NOT_SUPPORTED", Message: "remote Agent rejected the A2A version"}
+	case errors.Is(err, a2a.ErrUnauthenticated):
+		problem = core.Problem{Category: "authentication", Code: "UNAUTHENTICATED", Message: "remote Agent authentication failed"}
+	case errors.Is(err, a2a.ErrUnauthorized):
+		problem = core.Problem{Category: "authorization", Code: "UNAUTHORIZED", Message: "remote Agent denied the operation"}
+	case errors.Is(err, a2a.ErrTaskNotFound):
+		problem = core.Problem{Category: "resource", Code: "TASK_NOT_FOUND", Message: "remote task is unavailable"}
+	case errors.Is(err, a2a.ErrTaskNotCancelable):
+		problem = core.Problem{Category: "state", Code: "TASK_NOT_CANCELABLE", Message: "remote task is not cancelable"}
+	case errors.Is(err, a2a.ErrInvalidParams), errors.Is(err, a2a.ErrUnsupportedContentType):
+		problem = core.Problem{Category: "validation", Code: a2a.ErrorReason(err), Message: "remote Agent rejected the request"}
+	case errors.Is(err, a2a.ErrUnsupportedOperation), errors.Is(err, a2a.ErrPushNotificationNotSupported):
+		problem = core.Problem{Category: "protocol", Code: a2a.ErrorReason(err), Message: "remote Agent does not support the operation"}
+	}
+	return &federation.Error{Problem: problem, Cause: fmt.Errorf("a2a call: %w", err)}
+}

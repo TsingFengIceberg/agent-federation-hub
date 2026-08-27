@@ -4,7 +4,7 @@
 
 Agent Federation Hub is a research-oriented open-source project about cross-domain and cross-organization collaboration between AI agents. It does not try to orchestrate every agent inside one business. Instead, it explores how independently deployed agent systems, built with different frameworks and governed by different trust boundaries, can discover one another and collaborate through protocols that are observable, authenticated, and recoverable.
 
-> Current status: the A2A protocol and open-source ecosystem research baseline has been imported in full. Platform implementation, A2A Inspector/TCK conformance validation, and concrete technology choices remain pending. Imported research findings are not implemented product capabilities.
+> Current status: the A2A protocol and open-source ecosystem research baseline has been imported in full. The repository now has an A2A `1.0` JSON-RPC/SSE interoperability baseline and an initial single-process Hub slice covering Agent Card registration, tenant isolation, durable Task/Event/Artifact state, disconnect and restart reconciliation, cancellation, and constrained Push reception. Full protocol-aligned Inspector/TCK validation, distributed storage, production identity, and deployment choices remain incomplete.
 
 ## Direction
 
@@ -32,6 +32,8 @@ The initial boundary is to use A2A as the primary cross-agent protocol and AAMP 
 | [`docs/README.md`](docs/README.md) | Formal documentation index and ownership boundaries |
 | [`docs/research/a2a-study/`](docs/research/a2a-study/) | Complete A2A research snapshot imported from a pinned `agent-systems-study` commit |
 | [`submodules/`](submodules/) | Pinned source revisions for A2A, AAMP, registry, gateway, runtime, and sample projects |
+| [`docs/specifications/task-event-artifact-contract.md`](docs/specifications/task-event-artifact-contract.md) | Implemented initial federation Task, Event, and Artifact contract |
+| [`docs/architecture/phase-one-hub-conformance-boundary.md`](docs/architecture/phase-one-hub-conformance-boundary.md) | Current Hub, Push, TCK, Registry/Gateway, and AAMP capability boundary |
 
 General A2A protocol and cross-project research remains canonical in `agent-systems-study`. This repository keeps a traceable full snapshot synchronized one way from a recorded source commit; product architecture, ADRs, specifications, implementation, and tests evolve only here.
 
@@ -41,8 +43,8 @@ Werewolf validates private information, turn-based state, and adversarial collab
 
 ## Project Phases
 
-- **Phase 0: Protocol baseline and conformance**: the research notes are imported; next, select the initial A2A version and binding profile, then validate the implementation model with Inspector/TCK and minimal contract tests.
-- **Phase 1: Minimal interoperability**: an A2A client, server, registry, and observable task flow.
+- **Phase 0: Protocol baseline and conformance**: the initial A2A `1.0` JSON-RPC/SSE profile is selected and repository-owned Go/Python interoperability and contract tests pass; complete Inspector/TCK validation aligned to the selected protocol revision remains open.
+- **Phase 1: Minimal interoperability**: the first Go Hub service slice implements built-in Agent Card registration, a durable task journal, resumable events, cancellation, reconciliation, tenant isolation, and Push reception; distributed and production hardening are outside the current completion claim.
 - **Phase 2: Async and governance**: an AAMP adapter, delegated identity, tenancy, audit, retry, and human approval.
 - **Phase 3: Scenario validation**: validate reuse of the same core across orthogonal scenarios.
 
