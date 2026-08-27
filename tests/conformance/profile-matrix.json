@@ -1,0 +1,41 @@
+{
+  "protocolVersion": "1.0",
+  "protocolSourceCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
+  "goSDKModule": "github.com/a2aproject/a2a-go/v2",
+  "goSDKVersion": "v2.5.0",
+  "goSDKSourceCommit": "9d95b95445f4208ba77f48a137a278067937adb7",
+  "tckCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
+  "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
+  "profiles": [
+    {
+      "name": "a2a-v1-jsonrpc-sse",
+      "binding": "JSONRPC",
+      "streamTransport": "SSE",
+      "sutBindingFlag": "jsonrpc",
+      "status": "accepted-with-waivers",
+      "tckMustPassed": 67,
+      "tckMustSkipped": 25,
+      "tckMustFailed": 0
+    },
+    {
+      "name": "a2a-v1-http-json-sse",
+      "binding": "HTTP+JSON",
+      "streamTransport": "SSE",
+      "sutBindingFlag": "http_json",
+      "status": "verified-local-with-skips",
+      "tckMustPassed": 73,
+      "tckMustSkipped": 14,
+      "tckMustFailed": 0
+    },
+    {
+      "name": "a2a-v1-grpc",
+      "binding": "GRPC",
+      "streamTransport": "server-streaming",
+      "sutBindingFlag": "grpc",
+      "status": "not-implemented",
+      "tckMustPassed": 0,
+      "tckMustSkipped": 0,
+      "tckMustFailed": 0
+    }
+  ]
+}

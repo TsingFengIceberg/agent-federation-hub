@@ -6,6 +6,8 @@ go_bin=${GO_BIN:-go}
 tck_dir=${A2A_TCK_DIR:-}
 port=${A2A_TCK_PORT:-4999}
 report_dir=${A2A_TCK_REPORT_DIR:-"$repo_root/var/tck"}
+transport=${A2A_TCK_TRANSPORT:-jsonrpc}
+binding=${A2A_TCK_BINDING:-$transport}
 
 if [[ -z "$tck_dir" || ! -d "$tck_dir" ]]; then
   printf 'A2A_TCK_DIR must point to a checked-out a2a-tck repository\n' >&2
@@ -26,7 +28,7 @@ trap cleanup EXIT
 
 cd "$repo_root"
 "$go_bin" build -o "$sut_bin" ./cmd/a2a-tck-sut
-"$sut_bin" --listen "127.0.0.1:$port" --public-url "http://127.0.0.1:$port" >"$run_dir/sut.log" 2>&1 &
+"$sut_bin" --listen "127.0.0.1:$port" --public-url "http://127.0.0.1:$port" --binding "$binding" >"$run_dir/sut.log" 2>&1 &
 sut_pid=$!
 
 for _ in $(seq 1 80); do
@@ -46,18 +48,18 @@ if [[ ! -x "$python_bin" ]]; then
   python_bin=python3
 fi
 set +e
-(cd "$tck_dir" && "$python_bin" run_tck.py --sut-host "http://127.0.0.1:$port" --transport jsonrpc --level must)
+(cd "$tck_dir" && "$python_bin" run_tck.py --sut-host "http://127.0.0.1:$port" --transport "$transport" --level must)
 tck_status=$?
 set -e
 
 report_file="$report_dir/owned-sut-result.json"
 compatibility_report="$tck_dir/reports/compatibility.json"
 if [[ -f "$compatibility_report" ]]; then
-  "$python_bin" - "$report_file" "$compatibility_report" "$tck_status" <<'PY'
+  "$python_bin" - "$report_file" "$compatibility_report" "$tck_status" "$transport" <<'PY'
 import json
 import sys
 
-output_path, compatibility_path, exit_code = sys.argv[1:]
+output_path, compatibility_path, exit_code, transport = sys.argv[1:]
 with open(compatibility_path, encoding="utf-8") as handle:
     compatibility = json.load(handle)
 per_requirement = compatibility.get("per_requirement", {})
@@ -70,7 +72,7 @@ result = {
     "selectedProtocolCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
     "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
     "sut": "cmd/a2a-tck-sut",
-    "transport": "jsonrpc",
+    "transport": transport,
     "requestedLevel": "must",
     "exitCode": int(exit_code),
     "waiverFile": "tests/conformance/tck-waivers.json",
@@ -89,7 +91,7 @@ else
   "selectedProtocolCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
   "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
   "sut": "cmd/a2a-tck-sut",
-  "transport": "jsonrpc",
+  "transport": "$transport",
   "requestedLevel": "must",
   "exitCode": $tck_status,
   "waiverFile": "tests/conformance/tck-waivers.json",

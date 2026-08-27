@@ -25,6 +25,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 )
 
 const protocolVersion = "1.0"
@@ -139,6 +140,22 @@ func cloneTask(task *a2a.Task) *a2a.Task {
 }
 
 type tckExecutor struct{ state *sutTaskState }
+
+// nonNilTaskStore keeps the REST representation conformant for an empty task
+// list. The upstream in-memory store returns a nil slice, which JSON encodes
+// as null while the A2A schema requires an array.
+type nonNilTaskStore struct{ taskstore.Store }
+
+func (s nonNilTaskStore) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
+	response, err := s.Store.List(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if response.Tasks == nil {
+		response.Tasks = []*a2a.Task{}
+	}
+	return response, nil
+}
 
 func (t tckExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
@@ -257,23 +274,44 @@ func statusEvent(execCtx *a2asrv.ExecutorContext, state a2a.TaskState) *a2a.Task
 func main() {
 	listen := flag.String("listen", "127.0.0.1:9999", "HTTP listen address")
 	publicURL := flag.String("public-url", "", "public base URL used in the Agent Card")
+	binding := flag.String("binding", "jsonrpc", "A2A binding advertised by the SUT: jsonrpc or http_json")
 	flag.Parse()
 	if *publicURL == "" {
 		*publicURL = "http://" + *listen
 	}
+	var protocolBinding a2a.TransportProtocol
+	switch strings.ToLower(strings.TrimSpace(*binding)) {
+	case "jsonrpc":
+		protocolBinding = a2a.TransportProtocolJSONRPC
+	case "http_json", "http+json":
+		protocolBinding = a2a.TransportProtocolHTTPJSON
+	default:
+		log.Fatalf("unsupported A2A binding %q", *binding)
+	}
 	card := &a2a.AgentCard{
 		Name: "Agent Federation Hub Repository TCK SUT", Version: "1.0.0",
-		Description:         "Repository-owned deterministic A2A v1 JSON-RPC/SSE compatibility fixture",
-		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(*publicURL, a2a.TransportProtocolJSONRPC)},
+		Description:         "Repository-owned deterministic A2A v1 compatibility fixture",
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(*publicURL, protocolBinding)},
 		Capabilities:        a2a.AgentCapabilities{Streaming: true},
 		DefaultInputModes:   []string{"text"}, DefaultOutputModes: []string{"text", "application/json", "text/plain"},
 		Skills: []a2a.AgentSkill{{ID: "tck", Name: "A2A TCK fixture", Description: "Deterministic protocol scenarios", Tags: []string{"tck"}}},
 	}
 	state := newSUTTaskState()
-	handler := a2asrv.NewHandler(tckExecutor{state: state}, a2asrv.WithCallInterceptors(versionInterceptor{}))
+	tasks := nonNilTaskStore{Store: taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: a2asrv.NewTaskStoreAuthenticator(),
+	})}
+	handler := a2asrv.NewHandler(tckExecutor{state: state},
+		a2asrv.WithTaskStore(tasks), a2asrv.WithCallInterceptors(versionInterceptor{}))
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
-	mux.Handle("/", guardedJSONRPCHandler(state, a2asrv.NewJSONRPCHandler(handler)))
+	var protocolHandler http.Handler
+	switch protocolBinding {
+	case a2a.TransportProtocolJSONRPC:
+		protocolHandler = guardedJSONRPCHandler(state, a2asrv.NewJSONRPCHandler(handler))
+	case a2a.TransportProtocolHTTPJSON:
+		protocolHandler = guardedRESTHandler(state, a2asrv.NewRESTHandler(handler))
+	}
+	mux.Handle("/", protocolHandler)
 	server := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute}
 	listener, err := net.Listen("tcp4", *listen)
 	if err != nil {
@@ -332,6 +370,86 @@ func guardedJSONRPCHandler(state *sutTaskState, next http.Handler) http.Handler 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// guardedRESTHandler supplies the subscription semantics required by the
+// protocol when the deterministic executor has already returned. The SDK's
+// default local event queue treats that case as "no active execution", while
+// a provider may keep the observable Task available for later subscriptions.
+func guardedRESTHandler(state *sutTaskState, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		version := strings.TrimSpace(r.Header.Get(a2a.SvcParamVersion))
+		if version != "" && version != protocolVersion {
+			writeRESTErrorResponse(w, http.StatusBadRequest, "FAILED_PRECONDITION", "this version is not supported")
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, ":subscribe") {
+			taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/tasks/"), ":subscribe")
+			if taskID != "" && !strings.Contains(taskID, "/") {
+				handleRESTSubscribeOverride(w, r, a2a.TaskID(taskID), state)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleRESTSubscribeOverride(w http.ResponseWriter, r *http.Request, taskID a2a.TaskID, state *sutTaskState) {
+	task, ok := state.snapshot(taskID)
+	if !ok || task.Status.State.Terminal() {
+		writeRESTErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "task not found")
+		return
+	}
+	writeSSEHeaders(w)
+	if !writeRESTSSEEvent(w, &a2a.StreamResponse{Event: task}, state) {
+		return
+	}
+	flush, _ := w.(http.Flusher)
+	if flush != nil {
+		flush.Flush()
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			updated, exists := state.snapshot(taskID)
+			if !exists {
+				return
+			}
+			if updated.Status.State.Terminal() {
+				status := &a2a.TaskStatusUpdateEvent{TaskID: updated.ID, ContextID: updated.ContextID, Status: updated.Status}
+				_ = writeRESTSSEEvent(w, &a2a.StreamResponse{Event: status}, state)
+				if flush != nil {
+					flush.Flush()
+				}
+				return
+			}
+		}
+	}
+}
+
+func writeRESTSSEEvent(w http.ResponseWriter, response *a2a.StreamResponse, state *sutTaskState) bool {
+	payload, err := json.Marshal(response)
+	if err != nil {
+		return false
+	}
+	sequence := uint64(1)
+	if state != nil {
+		sequence = state.seq.Add(1)
+	}
+	_, err = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", strconv.FormatUint(sequence, 10), payload)
+	return err == nil
+}
+
+func writeRESTErrorResponse(w http.ResponseWriter, code int, status, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": code, "status": status, "message": message,
+	}})
 }
 
 func handleGetTaskOverride(w http.ResponseWriter, id json.RawMessage, params json.RawMessage, state *sutTaskState) bool {
