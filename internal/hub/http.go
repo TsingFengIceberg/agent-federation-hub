@@ -27,6 +27,7 @@ type HTTPHandler struct {
 	Authenticator     Authenticator
 	Authorizer        access.Authorizer
 	Audit             access.AuditSink
+	Limiter           access.RateLimiter
 	Now               func() time.Time
 	EventPollInterval time.Duration
 }
@@ -130,6 +131,24 @@ func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) htt
 		resourceID := r.PathValue("taskID")
 		if resourceID == "" {
 			resourceID = r.PathValue("artifactID")
+		}
+		if h.Limiter != nil {
+			retryAfter, allowed := h.Limiter.Allow(r.Context(), principal, access.Request{Action: action, ResourceID: resourceID})
+			if !allowed {
+				h.audit(r.Context(), access.AuditRecord{
+					RequestID: requestID, Decision: "rate_limited", Action: action,
+					Subject: principal.Subject, TenantID: principal.TenantID,
+					Issuer: principal.Issuer, AuthMethod: principal.AuthMethod,
+					ResourceID: resourceID, Reason: "rate_limit_exceeded",
+				})
+				seconds := int64(retryAfter / time.Second)
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+				writeProblem(w, http.StatusTooManyRequests, "rate_limit", "RATE_LIMIT_EXCEEDED", "request rate limit exceeded")
+				return
+			}
 		}
 		if err := h.Authorizer.Authorize(r.Context(), principal, access.Request{Action: action, ResourceID: resourceID}); err != nil {
 			audit.Decision = "authorization_denied"

@@ -12,6 +12,7 @@ The repository separates tests by the evidence they provide:
 | PostgreSQL integration | [`postgres/run-integration.sh`](postgres/run-integration.sh) | local Docker | Real transactions, rollback, two-pool Task/Artifact leases, quota reservation, revocation, and inbox exclusion |
 | MinIO integration | [`minio/run-integration.sh`](minio/run-integration.sh) | local Docker | Actual S3-compatible Artifact Put, Stat, Get, and Delete operations |
 | Hub service smoke | [`hub/run-smoke.sh`](hub/run-smoke.sh) | no | Real Hub HTTP registration, A2A Task/Artifact exchange, and SSE replay against the Go fixture |
+| Federated trust integration | `AFH_RUN_TRUST_TESTS=1 go test ./internal/hub -run TestRealTrustBundleWithOIDCMTLSPDPAndOperations` | local TLS loopback | OIDC discovery/JWKS rotation, token revocation, HTTPS PDP, authenticated rate limiting, fsync audit, and CA-verified SPIFFE mTLS |
 | A2A interoperability | [`interop/run-smoke.sh`](interop/run-smoke.sh) | no | Go Hub probe against independent Go and Python A2A Agents |
 | Provider-adapter mock | [`real-api/run-mock-smoke.sh`](real-api/run-mock-smoke.sh) | no | Full A2A-to-provider path against a local compatible SSE endpoint |
 | Live provider | [`real-api/run-smoke.sh`](real-api/run-smoke.sh) | yes | End-to-end A2A Task and SSE behavior around a real model call |
@@ -40,6 +41,13 @@ The MinIO layer is independently opt-in and uses a pinned disposable image:
 
 ```bash
 GO_BIN=/path/to/go tests/minio/run-integration.sh
+```
+
+The trust integration is opt-in because it binds local TLS listeners and uses
+generated keys and certificates:
+
+```bash
+AFH_RUN_TRUST_TESTS=1 go test ./internal/hub -run TestRealTrustBundleWithOIDCMTLSPDPAndOperations
 ```
 
 ## Configuration boundary

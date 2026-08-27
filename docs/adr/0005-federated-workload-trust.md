@@ -48,16 +48,19 @@ restart-replayed in the development journal.
   an operator-provided client CA and workload mapping.
 - The implementation does not operate an identity provider, CA, policy authoring
   system, consent service, or credential vault.
-- Real partner IdP/CA/PDP interoperability, automated key and certificate
-  rollover, rate limits, durable audit export, and outage drills remain gates
-  before a production trust claim.
+- Local process-scoped rate limiting and a `0600` JSONL audit sink are implemented
+  and exercised by an opt-in TLS integration test. Real partner IdP/CA/PDP
+  interoperability, distributed rate limiting, durable audit export/rotation,
+  automated certificate rollover, and outage drills remain gates before a
+  production trust claim.
 
 ## Evidence
 
-Unit and HTTP tests exercise OIDC issuer mismatch, cache and key rotation,
+Unit, HTTP, and opt-in local TLS integration tests exercise OIDC issuer mismatch, cache and key rotation,
 RSA/ECDSA/Ed25519 parsing, SPIFFE mapping, invalid-Bearer downgrade prevention,
 external PDP fail-closed behavior, credential redaction, RFC 8693 audience/
-actor/scope binding, token response narrowing, and durable token revocation.
+actor/scope binding, token response narrowing, durable token revocation,
+authenticated rate limiting, and fsync-backed audit persistence.
 
 ## Related Material
 

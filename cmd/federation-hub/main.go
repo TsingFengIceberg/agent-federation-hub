@@ -66,6 +66,9 @@ func main() {
 	artifactClamAVNetwork := flag.String("artifact-clamav-network", "tcp", "ClamAV network: tcp or unix")
 	artifactClamAVAddress := flag.String("artifact-clamav-address", "", "ClamAV daemon address")
 	allowPrivateArtifactURIs := flag.Bool("allow-private-artifact-urls", false, "allow private HTTPS Artifact source URLs for local development")
+	rateLimitPerMinute := flag.Int("rate-limit-per-minute", 0, "authenticated requests per minute per tenant/subject/action; required outside development")
+	rateLimitBurst := flag.Int("rate-limit-burst", 0, "initial burst for the authenticated request limiter")
+	auditFile := flag.String("audit-file", "", "0600 JSONL audit file with fsync; required outside development")
 	flag.Parse()
 
 	store, err := openStore(context.Background(), *storageBackend, *journalPath, *postgresDSNEnv)
@@ -100,6 +103,22 @@ func main() {
 	}
 	if *authMode != "development" && (!*artifactRequireClean || *artifactScanner == "none") {
 		log.Fatal("non-development authentication requires --artifact-require-clean and a configured malware scanner")
+	}
+	limiter := access.NewTokenBucketLimiter(*rateLimitPerMinute, *rateLimitBurst)
+	if *authMode != "development" && limiter == nil {
+		log.Fatal("non-development authentication requires --rate-limit-per-minute")
+	}
+	var auditSink access.AuditSink = access.NewJSONAuditSink(os.Stderr)
+	if *auditFile != "" {
+		durableAudit, auditErr := access.OpenFileAuditSink(*auditFile)
+		if auditErr != nil {
+			log.Fatal(auditErr)
+		}
+		defer durableAudit.Close()
+		auditSink = durableAudit
+	}
+	if *authMode != "development" && *auditFile == "" {
+		log.Fatal("non-development authentication requires --audit-file")
 	}
 	adapter := a2afederation.New(*remoteTimeout, secretProvider)
 	service := &hub.Service{
@@ -140,7 +159,7 @@ func main() {
 	handler := (&hub.HTTPHandler{
 		Service: service, DecodePush: a2afederation.DecodePush,
 		Authenticator: authenticator, Authorizer: authorizer,
-		Audit: access.NewJSONAuditSink(os.Stderr),
+		Audit: auditSink, Limiter: limiter,
 	}).Handler()
 	server := &http.Server{
 		Addr: *listen, Handler: handler,

@@ -213,6 +213,26 @@ func TestHTTPArtifactContentIsTenantScoped(t *testing.T) {
 	}
 }
 
+func TestHTTPRateLimitReturnsRetryAfterAndAuditsDecision(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	service := newTestService(t, store, &fakeAdapter{})
+	limiter := access.NewTokenBucketLimiter(60, 1)
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	limiterNow := now.UTC()
+	// Keep the test deterministic without relying on wall-clock refill.
+	limiter.Now = func() time.Time { return limiterNow }
+	handler := (&HTTPHandler{
+		Service: service, Authenticator: DevelopmentAuthenticator{},
+		Authorizer: access.DefaultScopeAuthorizer(), Limiter: limiter,
+	}).Handler()
+	first := request(t, handler, http.MethodGet, "/v1/agents", "", "tenant-a", nil)
+	second := request(t, handler, http.MethodGet, "/v1/agents", "", "tenant-a", nil)
+	if first.Code != http.StatusOK || second.Code != http.StatusTooManyRequests || second.Header().Get("Retry-After") == "" {
+		t.Fatalf("first=%d second=%d retry-after=%q", first.Code, second.Code, second.Header().Get("Retry-After"))
+	}
+}
+
 func testHTTPHandler(service *Service, decode PushDecoder, maxBodyBytes int64) http.Handler {
 	return (&HTTPHandler{
 		Service: service, DecodePush: decode, MaxBodyBytes: maxBodyBytes,

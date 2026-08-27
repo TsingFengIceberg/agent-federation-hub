@@ -59,10 +59,16 @@ contain decision metadata but exclude credentials and payloads.
   resource, and scopes while exposing only SecretProvider references to adapters.
 - OIDC requires `jti`; tenant/issuer/token revocations persist in the journal or
   PostgreSQL and authentication fails if revocation state is unavailable.
+- An optional process-local token bucket is keyed by tenant, subject, and action;
+  rejected requests return `429` with `Retry-After`. Deployments needing a
+  shared budget must provide a distributed implementation of the same interface.
+- Audit records can be written to an append-only `0600` JSONL file with an
+  `fsync` per record. This is a local durability boundary, not a central SIEM.
 
 ## Current Gates
 
 Production acceptance still requires real partner IdP, CA, and policy-service
-interoperability; automated key/certificate rollover; rate limiting; policy
-authoring and distribution; durable audit export; consent workflows; and trust
-service outage drills. Deterministic tests establish the local contract only.
+interoperability; automated key/certificate rollover; distributed rate limits;
+policy authoring and distribution; centralized durable audit export and
+retention; consent workflows; and trust-service outage drills. Deterministic
+and local TLS tests establish the local contract only.
