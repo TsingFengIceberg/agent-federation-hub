@@ -72,6 +72,8 @@ func main() {
 	auditFile := flag.String("audit-file", "", "0600 JSONL audit file with fsync; required outside development")
 	auditURL := flag.String("audit-url", "", "optional HTTPS central audit collector endpoint")
 	auditTokenReference := flag.String("audit-token-ref", "", "optional SecretProvider reference for the central audit collector")
+	outboxURL := flag.String("outbox-url", "", "optional HTTPS endpoint for durable Task Event outbox delivery")
+	outboxTokenReference := flag.String("outbox-token-ref", "", "optional SecretProvider reference for the outbox endpoint Bearer token")
 	flag.Parse()
 
 	store, err := openStore(context.Background(), *storageBackend, *journalPath, *postgresDSNEnv)
@@ -84,6 +86,27 @@ func main() {
 	secretProvider, err := buildSecretProvider(baseSecretProvider, *tokenProfilesFile)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *outboxTokenReference != "" && *outboxURL == "" {
+		log.Fatal("--outbox-token-ref requires --outbox-url")
+	}
+	var outboxPublisher worker.OutboxPublisher
+	if *outboxURL != "" {
+		if err := baseSecretProvider.ValidateReference(*outboxTokenReference); err != nil && *outboxTokenReference != "" {
+			log.Fatalf("outbox token reference: %v", err)
+		}
+		var bearer func(context.Context) (string, error)
+		if *outboxTokenReference != "" {
+			bearer = func(ctx context.Context) (string, error) {
+				return secretProvider.Resolve(ctx, *outboxTokenReference)
+			}
+		}
+		publisher, publisherErr := worker.NewHTTPOutboxPublisher(*outboxURL, bearer)
+		if publisherErr != nil {
+			log.Fatalf("outbox publisher: %v", publisherErr)
+		}
+		publisher.Client = &http.Client{Timeout: 10 * time.Second}
+		outboxPublisher = publisher
 	}
 	artifactMetadata, ok := store.(core.ArtifactMetadataStore)
 	if !ok {
@@ -221,6 +244,13 @@ func main() {
 		WorkerID: resolvedWorkerID + ":artifacts", LeaseDuration: *leaseDuration,
 		PollInterval: time.Minute,
 	}
+	var outbox *worker.OutboxProcessor
+	if outboxPublisher != nil {
+		outbox = &worker.OutboxProcessor{
+			Store: store, Publisher: outboxPublisher, WorkerID: resolvedWorkerID + ":outbox",
+			LeaseDuration: *leaseDuration, PollInterval: time.Second,
+		}
+	}
 	go func() {
 		if err := background.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("background reconciliation stopped: %v", err)
@@ -236,6 +266,13 @@ func main() {
 			log.Printf("Artifact lifecycle worker stopped: %v", err)
 		}
 	}()
+	if outbox != nil {
+		go func() {
+			if err := outbox.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("outbox publisher stopped: %v", err)
+			}
+		}()
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

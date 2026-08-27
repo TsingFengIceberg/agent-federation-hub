@@ -49,6 +49,16 @@ type InboxStore interface {
 	RetryInbox(context.Context, InboxLease, time.Time) error
 }
 
+// OutboxStore coordinates durable event publication across Hub instances.
+// Delivery is intentionally at-least-once; publishers must be idempotent.
+type OutboxStore interface {
+	EnqueueOutbox(context.Context, OutboxItem) (bool, error)
+	ClaimOutbox(context.Context, string, int, time.Time, time.Duration) ([]OutboxLease, error)
+	RenewOutboxLease(context.Context, OutboxLease, time.Time, time.Duration) (OutboxLease, error)
+	AckOutbox(context.Context, OutboxLease) error
+	RetryOutbox(context.Context, OutboxLease, time.Time) error
+}
+
 type RevocationStore interface {
 	RevokeToken(context.Context, TokenRevocation) error
 	TokenRevoked(context.Context, string, string, string, time.Time) (bool, error)
@@ -70,6 +80,7 @@ type ArtifactMetadataStore interface {
 type DurableStore interface {
 	LeasedStore
 	InboxStore
+	OutboxStore
 }
 
 type leaseState struct {
@@ -80,6 +91,14 @@ type leaseState struct {
 }
 
 type inboxState struct {
+	Owner       string    `json:"owner"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	AvailableAt time.Time `json:"availableAt"`
+	Attempt     uint32    `json:"attempt"`
+	Acked       bool      `json:"acked"`
+}
+
+type outboxState struct {
 	Owner       string    `json:"owner"`
 	ExpiresAt   time.Time `json:"expiresAt"`
 	AvailableAt time.Time `json:"availableAt"`
@@ -105,6 +124,9 @@ type journalRecord struct {
 	Inbox           *InboxItem          `json:"inbox,omitempty"`
 	InboxID         string              `json:"inboxId,omitempty"`
 	InboxState      *inboxState         `json:"inboxState,omitempty"`
+	Outbox          *OutboxItem         `json:"outbox,omitempty"`
+	OutboxID        string              `json:"outboxId,omitempty"`
+	OutboxState     *outboxState        `json:"outboxState,omitempty"`
 	Revocation      *TokenRevocation    `json:"revocation,omitempty"`
 	ArtifactObject  *ArtifactObject     `json:"artifactObject,omitempty"`
 	ArtifactUsage   *ArtifactUsage      `json:"artifactUsage,omitempty"`
@@ -123,6 +145,9 @@ type JournalStore struct {
 	inbox           map[string]InboxItem
 	inboxDedup      map[string]string
 	inboxStates     map[string]inboxState
+	outbox          map[string]OutboxItem
+	outboxDedup     map[string]string
+	outboxStates    map[string]outboxState
 	revocations     map[string]TokenRevocation
 	artifactObjects map[string]ArtifactObject
 	artifactUsage   map[string]ArtifactUsage
@@ -139,6 +164,9 @@ func OpenJournal(path string) (*JournalStore, error) {
 		inbox:           make(map[string]InboxItem),
 		inboxDedup:      make(map[string]string),
 		inboxStates:     make(map[string]inboxState),
+		outbox:          make(map[string]OutboxItem),
+		outboxDedup:     make(map[string]string),
+		outboxStates:    make(map[string]outboxState),
 		revocations:     make(map[string]TokenRevocation),
 		artifactObjects: make(map[string]ArtifactObject),
 		artifactUsage:   make(map[string]ArtifactUsage),
@@ -214,6 +242,10 @@ func (s *JournalStore) applyRecord(record journalRecord) {
 			}
 			s.dedupKeys[key][record.Event.DedupKey] = struct{}{}
 		}
+		if record.Outbox != nil {
+			s.outbox[record.Outbox.ID] = *record.Outbox
+			s.outboxDedup[outboxDedupKey(*record.Outbox)] = record.Outbox.ID
+		}
 	case "lease":
 		if record.TaskKey != "" && record.Lease != nil {
 			s.leases[record.TaskKey] = *record.Lease
@@ -226,6 +258,15 @@ func (s *JournalStore) applyRecord(record journalRecord) {
 	case "inbox_state":
 		if record.InboxID != "" && record.InboxState != nil {
 			s.inboxStates[record.InboxID] = *record.InboxState
+		}
+	case "outbox":
+		if record.Outbox != nil {
+			s.outbox[record.Outbox.ID] = *record.Outbox
+			s.outboxDedup[outboxDedupKey(*record.Outbox)] = record.Outbox.ID
+		}
+	case "outbox_state":
+		if record.OutboxID != "" && record.OutboxState != nil {
+			s.outboxStates[record.OutboxID] = *record.OutboxState
 		}
 	case "revocation":
 		if record.Revocation != nil {
@@ -324,7 +365,11 @@ func (s *JournalStore) CreateTask(_ context.Context, task Task, event Event) (Ta
 	if event.DedupKey == "" {
 		event.DedupKey = "local:" + event.ID
 	}
-	record := journalRecord{Version: 1, Kind: "task", Task: &task, Event: &event}
+	outbox, err := outboxFromEvent(event)
+	if err != nil {
+		return Task{}, err
+	}
+	record := journalRecord{Version: 1, Kind: "task", Task: &task, Event: &event, Outbox: &outbox}
 	if err := s.append(record); err != nil {
 		return Task{}, err
 	}
@@ -383,7 +428,11 @@ func (s *JournalStore) ApplyTaskVersion(
 	if event.DedupKey == "" {
 		event.DedupKey = "local:" + event.ID
 	}
-	record := journalRecord{Version: 1, Kind: "task", Task: &updated, Event: &event}
+	outbox, err := outboxFromEvent(event)
+	if err != nil {
+		return Task{}, false, err
+	}
+	record := journalRecord{Version: 1, Kind: "task", Task: &updated, Event: &event, Outbox: &outbox}
 	if err := s.append(record); err != nil {
 		return Task{}, false, err
 	}
@@ -517,6 +566,22 @@ func inboxDedupKey(item InboxItem) string {
 	return item.TenantID + "\x00" + item.TaskID + "\x00" + item.DedupKey
 }
 
+func outboxDedupKey(item OutboxItem) string {
+	return item.TenantID + "\x00" + item.TaskID + "\x00" + item.DedupKey
+}
+
+func outboxFromEvent(event Event) (OutboxItem, error) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return OutboxItem{}, fmt.Errorf("encode outbox event: %w", err)
+	}
+	return OutboxItem{
+		ID: event.ID, TenantID: event.TenantID, TaskID: event.TaskID,
+		DedupKey: event.DedupKey, Topic: event.Type, Payload: payload,
+		CreatedAt: event.CreatedAt,
+	}, nil
+}
+
 func (s *JournalStore) EnqueueInbox(_ context.Context, item InboxItem) (bool, error) {
 	if item.ID == "" || item.TenantID == "" || item.TaskID == "" || item.DedupKey == "" {
 		return false, errors.New("inbox ID, tenant, Task, and dedup key are required")
@@ -625,6 +690,127 @@ func (s *JournalStore) RetryInbox(_ context.Context, lease InboxLease, available
 	state.ExpiresAt = time.Time{}
 	state.AvailableAt = availableAt
 	record := journalRecord{Version: 1, Kind: "inbox_state", InboxID: lease.Item.ID, InboxState: &state}
+	if err := s.append(record); err != nil {
+		return err
+	}
+	s.applyRecord(record)
+	return nil
+}
+
+func (s *JournalStore) EnqueueOutbox(_ context.Context, item OutboxItem) (bool, error) {
+	if item.ID == "" || item.TenantID == "" || item.TaskID == "" || item.DedupKey == "" || item.Topic == "" {
+		return false, errors.New("outbox ID, tenant, Task, dedup key, and topic are required")
+	}
+	if len(item.Payload) == 0 || !json.Valid(item.Payload) {
+		return false, errors.New("outbox payload must be valid JSON")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, duplicate := s.outboxDedup[outboxDedupKey(item)]; duplicate {
+		return false, nil
+	}
+	record := journalRecord{Version: 1, Kind: "outbox", Outbox: &item}
+	if err := s.append(record); err != nil {
+		return false, err
+	}
+	s.applyRecord(record)
+	return true, nil
+}
+
+func (s *JournalStore) ClaimOutbox(
+	_ context.Context,
+	owner string,
+	limit int,
+	now time.Time,
+	duration time.Duration,
+) ([]OutboxLease, error) {
+	if owner == "" || limit <= 0 || duration <= 0 {
+		return nil, errors.New("outbox lease owner, positive limit, and duration are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.outbox))
+	for id := range s.outbox {
+		state := s.outboxStates[id]
+		if state.Acked || state.AvailableAt.After(now) || (state.Owner != "" && state.ExpiresAt.After(now)) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return s.outbox[ids[i]].CreatedAt.Before(s.outbox[ids[j]].CreatedAt) ||
+			(s.outbox[ids[i]].CreatedAt.Equal(s.outbox[ids[j]].CreatedAt) && ids[i] < ids[j])
+	})
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	result := make([]OutboxLease, 0, len(ids))
+	for _, id := range ids {
+		state := s.outboxStates[id]
+		state.Owner = owner
+		state.ExpiresAt = now.Add(duration)
+		state.Attempt++
+		record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: id, OutboxState: &state}
+		if err := s.append(record); err != nil {
+			return nil, err
+		}
+		s.applyRecord(record)
+		result = append(result, OutboxLease{Item: s.outbox[id], Owner: owner, ExpiresAt: state.ExpiresAt, Attempt: state.Attempt})
+	}
+	return result, nil
+}
+
+func (s *JournalStore) RenewOutboxLease(
+	_ context.Context,
+	lease OutboxLease,
+	now time.Time,
+	duration time.Duration,
+) (OutboxLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.outboxStates[lease.Item.ID]
+	if !ok || state.Owner != lease.Owner || !state.ExpiresAt.After(now) || state.Acked {
+		return OutboxLease{}, ErrLeaseLost
+	}
+	state.ExpiresAt = now.Add(duration)
+	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: lease.Item.ID, OutboxState: &state}
+	if err := s.append(record); err != nil {
+		return OutboxLease{}, err
+	}
+	s.applyRecord(record)
+	lease.ExpiresAt = state.ExpiresAt
+	return lease, nil
+}
+
+func (s *JournalStore) AckOutbox(_ context.Context, lease OutboxLease) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.outboxStates[lease.Item.ID]
+	if !ok || state.Owner != lease.Owner || state.Acked {
+		return ErrLeaseLost
+	}
+	state.Owner = ""
+	state.ExpiresAt = time.Time{}
+	state.Acked = true
+	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: lease.Item.ID, OutboxState: &state}
+	if err := s.append(record); err != nil {
+		return err
+	}
+	s.applyRecord(record)
+	return nil
+}
+
+func (s *JournalStore) RetryOutbox(_ context.Context, lease OutboxLease, availableAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.outboxStates[lease.Item.ID]
+	if !ok || state.Owner != lease.Owner || state.Acked {
+		return ErrLeaseLost
+	}
+	state.Owner = ""
+	state.ExpiresAt = time.Time{}
+	state.AvailableAt = availableAt
+	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: lease.Item.ID, OutboxState: &state}
 	if err := s.append(record); err != nil {
 		return err
 	}

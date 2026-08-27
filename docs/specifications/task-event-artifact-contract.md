@@ -56,12 +56,17 @@ the HTTP API maps this to `?after=<sequence>` or SSE `Last-Event-ID`. Adapter
 observations carry a stable deduplication key. Replaying the same observation
 does not increment the Task revision or event sequence.
 
-The JSON journal appends and `fsync`s each Agent, Task, lease, or inbox mutation
-and replays it on process restart. It remains a single-process development
-backend. The PostgreSQL backend commits a Task revision and its Event in one
-serializable transaction, enforces unique observation keys, and coordinates
-recoverable work across instances with expiring leases. This is not yet a claim
-of operational HA, backup, compaction, or encryption-at-rest verification.
+The JSON journal appends and `fsync`s each Agent, Task, lease, inbox, or outbox
+mutation and replays it on process restart. It remains a single-process
+development backend. The PostgreSQL backend commits a Task revision, its Event,
+and the corresponding outbox publication record in one serializable
+transaction, enforces unique observation keys, and coordinates recoverable work
+across instances with expiring leases. Outbox delivery is at-least-once:
+publishers must deduplicate by `dedupKey` and tolerate a crash between publish
+and acknowledgement. PostgreSQL migrations are checksum-recorded and fail
+closed if an applied migration is changed. This is not yet a claim of
+operational HA, backup, compaction, dead-letter administration, or
+encryption-at-rest verification.
 
 ## Artifact and Part
 

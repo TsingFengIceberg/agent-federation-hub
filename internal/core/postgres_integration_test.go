@@ -26,9 +26,19 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
+	var migrationCount int
+	if err := first.pool.QueryRow(ctx, `SELECT count(*) FROM afh_schema_migrations`).Scan(&migrationCount); err != nil {
+		t.Fatal(err)
+	}
+	if migrationCount < 3 {
+		t.Fatalf("schema migration ledger rows=%d, want at least 3", migrationCount)
+	}
+	if err := second.Migrate(ctx); err != nil {
+		t.Fatalf("idempotent migration check failed: %v", err)
+	}
 	if _, err := first.pool.Exec(ctx, `
 		TRUNCATE afh_artifacts, afh_artifact_usage, afh_token_revocations,
-			afh_events, afh_inbox, afh_tasks, afh_agents CASCADE`); err != nil {
+			afh_events, afh_outbox, afh_inbox, afh_tasks, afh_agents CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -83,6 +93,19 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 	events, err := second.EventsAfter(ctx, task.TenantID, task.ID, 0)
 	if err != nil || len(events) != 2 {
 		t.Fatalf("rolled back Event persisted: events=%+v err=%v", events, err)
+	}
+	outboxA, err := first.ClaimOutbox(ctx, "publisher-a", 10, now, time.Minute)
+	if err != nil || len(outboxA) != 2 || outboxA[0].Item.Topic != "task.status" {
+		t.Fatalf("transactional outbox claim=%+v err=%v", outboxA, err)
+	}
+	outboxB, err := second.ClaimOutbox(ctx, "publisher-b", 10, now, time.Minute)
+	if err != nil || len(outboxB) != 0 {
+		t.Fatalf("outbox lease duplicated=%+v err=%v", outboxB, err)
+	}
+	for _, lease := range outboxA {
+		if err := second.AckOutbox(ctx, lease); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	start := make(chan struct{})

@@ -36,8 +36,8 @@ accepted the original Task.
 
 | Area | Current executable evidence | Not yet claimed |
 |---|---|---|
-| A2A profile | Exact `1.0` JSON-RPC selection, SDK `v2.5.0`, SSE mapping, repository-owned deterministic TCK SUT | HTTP+JSON, gRPC, extensions, signed/extended Card policy |
-| Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event transactions, revisions, and real two-pool lease tests | Managed database qualification, HA, backup/restore, compaction/retention |
+| A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, SDK `v2.5.0`, explicit opt-in HTTP+JSON adapter path, repository-owned deterministic TCK SUT | HTTP+JSON accepted-profile evidence, gRPC, extensions, signed/extended Card policy |
+| Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event/outbox transactions, revisions, schema checksum ledger, and real two-pool lease tests | Managed database qualification, HA, backup/restore, compaction/retention, outbox dead-letter operations |
 | Recovery | Known-ID disconnect uses `GetTask`; unknown-ID send becomes ambiguous | Automated ambiguous-operation resolution or exactly-once execution |
 | Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, and audit | Real partner trust-service integration, automated rollover, consent, centralized retention, and outage qualification |
 | Tenancy | Authenticated Principal supplies tenant for every management lookup; forged JWT-mode tenant header is ignored | ABAC policy administration, quotas, tenant encryption keys, cross-organization trust federation |

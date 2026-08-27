@@ -8,21 +8,25 @@ import (
 )
 
 type profile struct {
-	ProtocolVersion            string `json:"protocolVersion"`
-	ProtocolSourceCommit       string `json:"protocolSourceCommit"`
-	Binding                    string `json:"binding"`
-	StreamTransport            string `json:"streamTransport"`
-	GoSDKModule                string `json:"goSDKModule"`
-	GoSDKVersion               string `json:"goSDKVersion"`
-	EvaluatedTCKCommit         string `json:"evaluatedTCKCommit"`
-	EvaluatedTCKProtocolCommit string `json:"evaluatedTCKProtocolCommit"`
-	RepositoryContractStatus   string `json:"repositoryContractStatus"`
-	ExternalTCKStatus          string `json:"externalTCKStatus"`
-	OwnedSUT                   string `json:"ownedSUT"`
-	OwnedSUTProfile            string `json:"ownedSUTProfile"`
-	OwnedSUTStatus             string `json:"ownedSUTStatus"`
-	WaiverFile                 string `json:"waiverFile"`
-	Runner                     string `json:"runner"`
+	ProfileName                string   `json:"profileName"`
+	ProtocolVersion            string   `json:"protocolVersion"`
+	ProtocolSourceCommit       string   `json:"protocolSourceCommit"`
+	Binding                    string   `json:"binding"`
+	StreamTransport            string   `json:"streamTransport"`
+	GoSDKModule                string   `json:"goSDKModule"`
+	GoSDKVersion               string   `json:"goSDKVersion"`
+	EvaluatedTCKCommit         string   `json:"evaluatedTCKCommit"`
+	EvaluatedTCKProtocolCommit string   `json:"evaluatedTCKProtocolCommit"`
+	RepositoryContractStatus   string   `json:"repositoryContractStatus"`
+	ExternalTCKStatus          string   `json:"externalTCKStatus"`
+	OwnedSUT                   string   `json:"ownedSUT"`
+	OwnedSUTProfile            string   `json:"ownedSUTProfile"`
+	OwnedSUTStatus             string   `json:"ownedSUTStatus"`
+	WaiverFile                 string   `json:"waiverFile"`
+	Runner                     string   `json:"runner"`
+	SupportedBindings          []string `json:"supportedBindings"`
+	SupportedStreamTransports  []string `json:"supportedStreamTransports"`
+	BindingSelection           string   `json:"bindingSelection"`
 }
 
 type waiverDocument struct {
@@ -48,6 +52,11 @@ func TestSelectedA2AProfilePinsStayExplicit(t *testing.T) {
 	}
 	if selected.ProtocolVersion != "1.0" || selected.Binding != "JSONRPC" || selected.StreamTransport != "SSE" {
 		t.Fatalf("unexpected selected wire profile: %+v", selected)
+	}
+	if selected.ProfileName != "a2a-v1-jsonrpc-sse" || selected.BindingSelection != "explicit" ||
+		len(selected.SupportedBindings) != 1 || selected.SupportedBindings[0] != "JSONRPC" ||
+		len(selected.SupportedStreamTransports) != 1 || selected.SupportedStreamTransports[0] != "SSE" {
+		t.Fatalf("profile coverage is not explicit: %+v", selected)
 	}
 	if len(selected.ProtocolSourceCommit) != 40 || len(selected.EvaluatedTCKCommit) != 40 || len(selected.EvaluatedTCKProtocolCommit) != 40 {
 		t.Fatal("protocol and TCK sources must be full commit IDs")

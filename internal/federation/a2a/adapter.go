@@ -23,15 +23,37 @@ type Adapter struct {
 	resolver        *agentcard.Resolver
 	transportClient *http.Client
 	secrets         secrets.Provider
+	profiles        []BindingProfile
 }
 
 func New(timeout time.Duration, providers ...secrets.Provider) *Adapter {
 	client := &http.Client{Timeout: timeout}
-	adapter := &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client}
+	adapter := &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client,
+		profiles: []BindingProfile{InitialBindingProfile}}
 	if len(providers) > 0 {
 		adapter.secrets = providers[0]
 	}
 	return adapter
+}
+
+// NewWithProfiles creates an adapter with an explicit ordered set of A2A wire
+// profiles. The default constructor intentionally exposes only the accepted
+// first profile; callers must opt into additional Bindings and test them.
+func NewWithProfiles(timeout time.Duration, profiles []BindingProfile, providers ...secrets.Provider) (*Adapter, error) {
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("at least one A2A binding profile is required")
+	}
+	for _, profile := range profiles {
+		if err := profile.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	client := &http.Client{Timeout: timeout}
+	adapter := &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client, profiles: append([]BindingProfile(nil), profiles...)}
+	if len(providers) > 0 {
+		adapter.secrets = providers[0]
+	}
+	return adapter, nil
 }
 
 func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Descriptor, error) {
@@ -39,9 +61,9 @@ func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Desc
 	if err != nil {
 		return federation.Descriptor{}, mapError(err, false)
 	}
-	endpoint, err := selectEndpoint(card)
+	endpoint, _, err := selectEndpointForProfiles(card, a.profiles)
 	if err != nil {
-		return federation.Descriptor{}, err
+		return federation.Descriptor{}, profileSelectionError(err)
 	}
 	schemes := make([]string, 0, len(card.SecuritySchemes))
 	for name := range card.SecuritySchemes {
@@ -59,11 +81,9 @@ func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Desc
 }
 
 func selectEndpoint(card *a2a.AgentCard) (*a2a.AgentInterface, error) {
-	for _, endpoint := range card.SupportedInterfaces {
-		if endpoint.ProtocolBinding == a2a.TransportProtocolJSONRPC &&
-			endpoint.ProtocolVersion == a2a.Version {
-			return endpoint, nil
-		}
+	endpoint, _, err := selectEndpointForProfiles(card, []BindingProfile{InitialBindingProfile})
+	if err == nil {
+		return endpoint, nil
 	}
 	return nil, &federation.Error{Problem: core.Problem{
 		Category: "protocol", Code: "VERSION_NOT_SUPPORTED",
@@ -76,9 +96,9 @@ func (a *Adapter) client(ctx context.Context, agent core.Agent) (*a2aclient.Clie
 	if err != nil {
 		return nil, ctx, mapError(err, false)
 	}
-	endpoint, err := selectEndpoint(card)
+	endpoint, profile, err := selectEndpointForProfiles(card, a.profiles)
 	if err != nil {
-		return nil, ctx, err
+		return nil, ctx, profileSelectionError(err)
 	}
 	if endpoint.URL != agent.Endpoint || string(endpoint.ProtocolBinding) != agent.ProtocolBinding ||
 		string(endpoint.ProtocolVersion) != agent.ProtocolVersion {
@@ -110,21 +130,31 @@ func (a *Adapter) client(ctx context.Context, agent core.Agent) (*a2aclient.Clie
 		return nil, ctx, err
 	}
 
-	client, err := a2aclient.NewFromCard(
-		ctx,
-		card,
+	options := []a2aclient.FactoryOption{
 		a2aclient.WithDefaultsDisabled(),
-		a2aclient.WithJSONRPCTransport(a.transportClient),
 		a2aclient.WithConfig(a2aclient.Config{
-			PreferredTransports:      []a2a.TransportProtocol{a2a.TransportProtocolJSONRPC},
+			PreferredTransports:      []a2a.TransportProtocol{profile.Binding},
 			DisableTenantPropagation: true,
 		}),
 		a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{Service: credentials}),
-	)
+	}
+	if profile.Binding == a2a.TransportProtocolJSONRPC {
+		options = append(options, a2aclient.WithJSONRPCTransport(a.transportClient))
+	} else {
+		options = append(options, a2aclient.WithRESTTransport(a.transportClient))
+	}
+	client, err := a2aclient.NewFromCard(ctx, card, options...)
 	if err != nil {
 		return nil, ctx, mapError(err, false)
 	}
 	return client, a2aclient.AttachSessionID(ctx, sessionID), nil
+}
+
+func profileSelectionError(cause error) *federation.Error {
+	return &federation.Error{Problem: core.Problem{
+		Category: "protocol", Code: "VERSION_OR_BINDING_NOT_SUPPORTED",
+		Message: "Agent Card does not advertise a configured A2A binding profile",
+	}, Cause: cause}
 }
 
 func validateCredentials(

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,14 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("list PostgreSQL migrations: %w", err)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	if _, err := s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS afh_schema_migrations (
+			name TEXT PRIMARY KEY,
+			checksum BYTEA NOT NULL,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("create schema migration ledger: %w", err)
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -56,8 +65,60 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read PostgreSQL migration %s: %w", entry.Name(), err)
 		}
-		if _, err := s.pool.Exec(ctx, string(migration)); err != nil {
+		checksum := sha256.Sum256(migration)
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin PostgreSQL migration %s: %w", entry.Name(), err)
+		}
+		var applied []byte
+		err = tx.QueryRow(ctx, `
+			SELECT checksum FROM afh_schema_migrations WHERE name=$1 FOR UPDATE`, entry.Name()).Scan(&applied)
+		if err == nil {
+			if string(applied) != string(checksum[:]) {
+				_ = tx.Rollback(ctx)
+				return fmt.Errorf("PostgreSQL migration %s checksum changed", entry.Name())
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit PostgreSQL migration %s ledger check: %w", entry.Name(), err)
+			}
+			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("read PostgreSQL migration ledger %s: %w", entry.Name(), err)
+		}
+		// Serialize migration runners while keeping DDL and its ledger row atomic.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('agent-federation-hub:schema'))`); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("lock PostgreSQL migration %s: %w", entry.Name(), err)
+		}
+		// A concurrent runner may have applied this migration while this
+		// transaction waited for the advisory lock, so check the ledger again.
+		if err := tx.QueryRow(ctx, `
+			SELECT checksum FROM afh_schema_migrations WHERE name=$1`, entry.Name()).Scan(&applied); err == nil {
+			if string(applied) != string(checksum[:]) {
+				_ = tx.Rollback(ctx)
+				return fmt.Errorf("PostgreSQL migration %s checksum changed", entry.Name())
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit PostgreSQL migration %s ledger check: %w", entry.Name(), err)
+			}
+			continue
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("recheck PostgreSQL migration ledger %s: %w", entry.Name(), err)
+		}
+		if _, err := tx.Exec(ctx, string(migration)); err != nil {
+			_ = tx.Rollback(ctx)
 			return fmt.Errorf("apply PostgreSQL migration %s: %w", entry.Name(), err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO afh_schema_migrations (name, checksum) VALUES ($1, $2)`, entry.Name(), checksum[:]); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("record PostgreSQL migration %s: %w", entry.Name(), err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit PostgreSQL migration %s: %w", entry.Name(), err)
 		}
 	}
 	return nil
@@ -149,6 +210,16 @@ func (s *PostgresStore) CreateTask(ctx context.Context, task Task, event Event) 
 		event.TenantID, event.TaskID, event.Sequence, event.DedupKey, eventPayload, event.CreatedAt); err != nil {
 		return Task{}, err
 	}
+	outbox, err := outboxFromEvent(event)
+	if err != nil {
+		return Task{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO afh_outbox (id, tenant_id, task_id, dedup_key, topic, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		outbox.ID, outbox.TenantID, outbox.TaskID, outbox.DedupKey, outbox.Topic, outbox.Payload, outbox.CreatedAt); err != nil {
+		return Task{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Task{}, err
 	}
@@ -237,6 +308,16 @@ func (s *PostgresStore) ApplyTaskVersion(
 		INSERT INTO afh_events (tenant_id, task_id, sequence, dedup_key, payload, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		event.TenantID, event.TaskID, event.Sequence, event.DedupKey, eventPayload, event.CreatedAt); err != nil {
+		return Task{}, false, err
+	}
+	outbox, err := outboxFromEvent(event)
+	if err != nil {
+		return Task{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO afh_outbox (id, tenant_id, task_id, dedup_key, topic, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		outbox.ID, outbox.TenantID, outbox.TaskID, outbox.DedupKey, outbox.Topic, outbox.Payload, outbox.CreatedAt); err != nil {
 		return Task{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -487,6 +568,117 @@ func (s *PostgresStore) AckInbox(ctx context.Context, lease InboxLease) error {
 func (s *PostgresStore) RetryInbox(ctx context.Context, lease InboxLease, availableAt time.Time) error {
 	command, err := s.pool.Exec(ctx, `
 		UPDATE afh_inbox SET available_at=$1, lease_owner='', lease_expires_at=NULL
+		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL`, availableAt, lease.Item.ID, lease.Owner)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (s *PostgresStore) EnqueueOutbox(ctx context.Context, item OutboxItem) (bool, error) {
+	if item.ID == "" || item.TenantID == "" || item.TaskID == "" || item.DedupKey == "" || item.Topic == "" {
+		return false, errors.New("outbox ID, tenant, Task, dedup key, and topic are required")
+	}
+	if len(item.Payload) == 0 || !json.Valid(item.Payload) {
+		return false, errors.New("outbox payload must be valid JSON")
+	}
+	command, err := s.pool.Exec(ctx, `
+		INSERT INTO afh_outbox (id, tenant_id, task_id, dedup_key, topic, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (tenant_id, task_id, dedup_key) DO NOTHING`,
+		item.ID, item.TenantID, item.TaskID, item.DedupKey, item.Topic, item.Payload, item.CreatedAt)
+	if err != nil {
+		return false, err
+	}
+	return command.RowsAffected() == 1, nil
+}
+
+func (s *PostgresStore) ClaimOutbox(
+	ctx context.Context,
+	owner string,
+	limit int,
+	now time.Time,
+	duration time.Duration,
+) ([]OutboxLease, error) {
+	if owner == "" || limit <= 0 || duration <= 0 {
+		return nil, errors.New("outbox lease owner, positive limit, and duration are required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT id FROM afh_outbox
+			WHERE acked_at IS NULL AND available_at <= $1
+			  AND (lease_owner = '' OR lease_expires_at <= $1)
+			ORDER BY available_at, created_at, id
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		)
+		UPDATE afh_outbox AS outbox
+		SET lease_owner=$3, lease_expires_at=$4, attempts=outbox.attempts+1
+		FROM candidates
+		WHERE outbox.id=candidates.id
+		RETURNING outbox.id, outbox.tenant_id, outbox.task_id, outbox.dedup_key,
+			outbox.topic, outbox.payload, outbox.created_at, outbox.lease_expires_at, outbox.attempts`,
+		now, limit, owner, now.Add(duration))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]OutboxLease, 0)
+	for rows.Next() {
+		var item OutboxItem
+		var expiresAt time.Time
+		var attempt uint32
+		if err := rows.Scan(
+			&item.ID, &item.TenantID, &item.TaskID, &item.DedupKey,
+			&item.Topic, &item.Payload, &item.CreatedAt, &expiresAt, &attempt,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, OutboxLease{Item: item, Owner: owner, ExpiresAt: expiresAt, Attempt: attempt})
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) RenewOutboxLease(
+	ctx context.Context,
+	lease OutboxLease,
+	now time.Time,
+	duration time.Duration,
+) (OutboxLease, error) {
+	expiresAt := now.Add(duration)
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_outbox SET lease_expires_at=$1
+		WHERE id=$2 AND lease_owner=$3 AND lease_expires_at>$4 AND acked_at IS NULL`,
+		expiresAt, lease.Item.ID, lease.Owner, now)
+	if err != nil {
+		return OutboxLease{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return OutboxLease{}, ErrLeaseLost
+	}
+	lease.ExpiresAt = expiresAt
+	return lease, nil
+}
+
+func (s *PostgresStore) AckOutbox(ctx context.Context, lease OutboxLease) error {
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_outbox SET acked_at=now(), lease_owner='', lease_expires_at=NULL
+		WHERE id=$1 AND lease_owner=$2 AND acked_at IS NULL`, lease.Item.ID, lease.Owner)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (s *PostgresStore) RetryOutbox(ctx context.Context, lease OutboxLease, availableAt time.Time) error {
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_outbox SET available_at=$1, lease_owner='', lease_expires_at=NULL
 		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL`, availableAt, lease.Item.ID, lease.Owner)
 	if err != nil {
 		return err

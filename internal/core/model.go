@@ -145,6 +145,25 @@ type InboxLease struct {
 	Attempt   uint32    `json:"attempt"`
 }
 
+// OutboxItem is a durable, at-least-once publication record derived from a
+// committed Hub event. Consumers must use DedupKey when applying side effects.
+type OutboxItem struct {
+	ID        string          `json:"id"`
+	TenantID  string          `json:"tenantId"`
+	TaskID    string          `json:"taskId"`
+	DedupKey  string          `json:"dedupKey"`
+	Topic     string          `json:"topic"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
+type OutboxLease struct {
+	Item      OutboxItem `json:"item"`
+	Owner     string     `json:"owner"`
+	ExpiresAt time.Time  `json:"expiresAt"`
+	Attempt   uint32     `json:"attempt"`
+}
+
 type TokenRevocation struct {
 	Issuer    string    `json:"issuer"`
 	TokenID   string    `json:"tokenId"`

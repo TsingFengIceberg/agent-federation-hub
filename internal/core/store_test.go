@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -266,5 +267,49 @@ func TestJournalArtifactQuotaReplayAndDeletionLease(t *testing.T) {
 	usage, _ = store.GetArtifactUsage(context.Background(), object.TenantID)
 	if usage.Bytes != 0 || usage.Objects != 0 {
 		t.Fatalf("completed deletion usage=%+v", usage)
+	}
+}
+
+func TestJournalTaskEventIsAtomicallyEnqueuedInOutbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.journal")
+	store, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	task, err := store.CreateTask(ctx, Task{
+		ID: "task-outbox", TenantID: "tenant-a", AgentID: "agent-1",
+		State: TaskStateSubmitted, CreatedAt: now, UpdatedAt: now,
+	}, Event{Type: "task.submitted", State: TaskStateSubmitted, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := store.ClaimOutbox(ctx, "publisher-a", 10, now, time.Minute)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("outbox leases=%+v err=%v", leases, err)
+	}
+	if leases[0].Item.TaskID != task.ID || leases[0].Item.Topic != "task.submitted" || !json.Valid(leases[0].Item.Payload) {
+		t.Fatalf("unexpected outbox item=%+v", leases[0].Item)
+	}
+	if second, err := store.ClaimOutbox(ctx, "publisher-b", 10, now, time.Minute); err != nil || len(second) != 0 {
+		t.Fatalf("leased outbox was duplicated: %+v err=%v", second, err)
+	}
+	if err := store.AckOutbox(ctx, leases[0]); err != nil {
+		t.Fatal(err)
+	}
+	if third, err := store.ClaimOutbox(ctx, "publisher-c", 10, now.Add(time.Hour), time.Minute); err != nil || len(third) != 0 {
+		t.Fatalf("acked outbox was redelivered: %+v err=%v", third, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if replayed, err := store.ClaimOutbox(ctx, "publisher-d", 10, now.Add(2*time.Hour), time.Minute); err != nil || len(replayed) != 0 {
+		t.Fatalf("acked outbox replayed after restart: %+v err=%v", replayed, err)
 	}
 }

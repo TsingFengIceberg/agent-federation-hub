@@ -1,8 +1,12 @@
 {
+	"profileName": "a2a-v1-jsonrpc-sse",
   "protocolVersion": "1.0",
   "protocolSourceCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
   "binding": "JSONRPC",
   "streamTransport": "SSE",
+	"supportedBindings": ["JSONRPC"],
+	"supportedStreamTransports": ["SSE"],
+	"bindingSelection": "explicit",
   "goSDKModule": "github.com/a2aproject/a2a-go/v2",
   "goSDKVersion": "v2.5.0",
   "evaluatedTCKCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",

@@ -28,6 +28,13 @@ The first interoperability slice targets:
 - opaque remote Agents: the Hub depends only on the Agent Card and observable
   A2A behavior, never on the Agent's framework, model, tools, or workflow graph.
 
+The selected profile is machine-readable in
+[`tests/conformance/a2a-profile.json`](../../tests/conformance/a2a-profile.json)
+and uses explicit interface matching. The adapter has an opt-in profile
+constructor for HTTP+JSON, but that Binding is not part of this accepted
+profile until it has an owned fixture and current-spec conformance evidence.
+SDK transport fallback must not silently expand the advertised support matrix.
+
 Production deployments will use HTTPS. Plain HTTP is allowed only for local
 interoperability fixtures.
 
@@ -74,7 +81,7 @@ restart durability, exactly-once execution, or cross-instance recovery.
 
 The following are intentionally outside this first profile:
 
-- HTTP+JSON and gRPC Bindings;
+- HTTP+JSON and gRPC Bindings as accepted product profiles;
 - Push notification configuration and callback security;
 - AAMP asynchronous mailbox adaptation;
 - registry, ARD, routing policy, and semantic discovery;

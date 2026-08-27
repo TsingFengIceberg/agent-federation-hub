@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -27,6 +28,30 @@ func TestSelectEndpointRequiresExactJSONRPCV1(t *testing.T) {
 				t.Fatalf("error = %v, wantError=%v", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestConfiguredProfilesSelectHTTPJSONWithoutSDKFallback(t *testing.T) {
+	card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{
+		{URL: "https://agent.example/rest", ProtocolBinding: a2a.TransportProtocolHTTPJSON, ProtocolVersion: a2a.Version},
+		{URL: "https://agent.example/rpc", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: a2a.Version},
+	}}
+	endpoint, profile, err := selectEndpointForProfiles(card, []BindingProfile{{
+		ProtocolVersion: string(a2a.Version), Binding: a2a.TransportProtocolHTTPJSON, StreamTransport: "SSE",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint.URL != "https://agent.example/rest" || profile.Binding != a2a.TransportProtocolHTTPJSON {
+		t.Fatalf("selected endpoint=%+v profile=%+v", endpoint, profile)
+	}
+}
+
+func TestNewWithProfilesValidatesExplicitContract(t *testing.T) {
+	if _, err := NewWithProfiles(time.Second, []BindingProfile{{
+		ProtocolVersion: string(a2a.Version), Binding: a2a.TransportProtocolGRPC, StreamTransport: "SSE",
+	}}); err == nil {
+		t.Fatal("unsupported gRPC profile was accepted")
 	}
 }
 
