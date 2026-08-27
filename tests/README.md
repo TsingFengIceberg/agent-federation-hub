@@ -38,6 +38,17 @@ Docker and the pinned `postgres:17-alpine` image:
 AFH_RUN_POSTGRES_TESTS=1 GO_BIN=/path/to/go tests/run-deterministic.sh
 ```
 
+The operator backup contract can be exercised independently with the same
+PostgreSQL image. It creates a temporary custom-format archive, recreates the
+database schema, restores it, and verifies a sentinel row:
+
+```bash
+tests/postgres/run-backup-restore.sh
+```
+
+This is a restore-path smoke test, not a substitute for encrypted managed
+backups, retention policy, point-in-time recovery, or disaster-recovery drills.
+
 The MinIO layer is independently opt-in and uses a pinned disposable image:
 
 ```bash

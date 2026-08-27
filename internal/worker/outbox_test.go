@@ -64,3 +64,27 @@ func TestOutboxProcessorRetriesFailedPublish(t *testing.T) {
 		t.Fatalf("retry delay ignored: leases=%+v err=%v", leases, err)
 	}
 }
+
+func TestOutboxProcessorDeadLettersAfterMaximumAttempts(t *testing.T) {
+	store, err := core.OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	if _, err := store.EnqueueOutbox(context.Background(), core.OutboxItem{
+		ID: "outbox-dlq", TenantID: "tenant-a", TaskID: "task-1", DedupKey: "event-dlq", Topic: "task.status", Payload: json.RawMessage(`{}`), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	processor := &OutboxProcessor{
+		Store: store, Publisher: &fakeOutboxPublisher{err: errors.New("collector permanently unavailable")}, WorkerID: "publisher-a",
+		Now: func() time.Time { return now }, MaxAttempts: 1,
+	}
+	if count, err := processor.RunOnce(context.Background()); count != 1 || err == nil {
+		t.Fatalf("count=%d err=%v, want one dead-lettered item and an observable error", count, err)
+	}
+	if leases, err := store.ClaimOutbox(context.Background(), "publisher-b", 1, now.Add(time.Hour), time.Minute); err != nil || len(leases) != 0 {
+		t.Fatalf("dead-lettered item was claimable: leases=%+v err=%v", leases, err)
+	}
+}

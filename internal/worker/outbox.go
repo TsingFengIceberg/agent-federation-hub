@@ -27,6 +27,8 @@ type OutboxProcessor struct {
 	PollInterval  time.Duration
 	BaseBackoff   time.Duration
 	MaxBackoff    time.Duration
+	MaxAttempts   uint32
+	Metrics       *OutboxMetrics
 	Now           func() time.Time
 }
 
@@ -54,17 +56,42 @@ func (p *OutboxProcessor) RunOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if p.Metrics != nil {
+		p.Metrics.Claimed.Add(uint64(len(leases)))
+	}
 	var failures []error
 	for _, lease := range leases {
 		if err := p.Publisher.Publish(ctx, lease.Item); err != nil {
+			if p.Metrics != nil {
+				p.Metrics.PublishFailed.Add(1)
+			}
+			if p.MaxAttempts > 0 && lease.Attempt >= p.MaxAttempts {
+				if deadLetterErr := p.Store.DeadLetterOutbox(ctx, lease, err.Error()); deadLetterErr != nil {
+					failures = append(failures, fmt.Errorf("dead-letter outbox item %s: %w", lease.Item.ID, errors.Join(err, deadLetterErr)))
+				} else {
+					if p.Metrics != nil {
+						p.Metrics.DeadLettered.Add(1)
+					}
+					failures = append(failures, fmt.Errorf("dead-lettered outbox item %s after %d attempts: %w", lease.Item.ID, lease.Attempt, err))
+				}
+				continue
+			}
 			delay := boundedBackoff(lease.Attempt, p.baseBackoff(), p.maxBackoff())
 			if retryErr := p.Store.RetryOutbox(ctx, lease, p.now().Add(delay)); retryErr != nil {
 				err = errors.Join(err, retryErr)
+			} else if p.Metrics != nil {
+				p.Metrics.Retried.Add(1)
 			}
 			failures = append(failures, fmt.Errorf("publish outbox item %s: %w", lease.Item.ID, err))
 			continue
 		}
+		if p.Metrics != nil {
+			p.Metrics.Published.Add(1)
+		}
 		if err := p.Store.AckOutbox(ctx, lease); err != nil {
+			if p.Metrics != nil {
+				p.Metrics.AckFailed.Add(1)
+			}
 			failures = append(failures, fmt.Errorf("ack outbox item %s: %w", lease.Item.ID, err))
 		}
 	}

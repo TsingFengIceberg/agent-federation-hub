@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,6 +58,7 @@ type OutboxStore interface {
 	RenewOutboxLease(context.Context, OutboxLease, time.Time, time.Duration) (OutboxLease, error)
 	AckOutbox(context.Context, OutboxLease) error
 	RetryOutbox(context.Context, OutboxLease, time.Time) error
+	DeadLetterOutbox(context.Context, OutboxLease, string) error
 }
 
 type RevocationStore interface {
@@ -99,11 +101,13 @@ type inboxState struct {
 }
 
 type outboxState struct {
-	Owner       string    `json:"owner"`
-	ExpiresAt   time.Time `json:"expiresAt"`
-	AvailableAt time.Time `json:"availableAt"`
-	Attempt     uint32    `json:"attempt"`
-	Acked       bool      `json:"acked"`
+	Owner        string    `json:"owner"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	AvailableAt  time.Time `json:"availableAt"`
+	Attempt      uint32    `json:"attempt"`
+	Acked        bool      `json:"acked"`
+	DeadLettered bool      `json:"deadLettered"`
+	LastError    string    `json:"lastError,omitempty"`
 }
 
 type artifactLeaseState struct {
@@ -152,6 +156,113 @@ type JournalStore struct {
 	artifactObjects map[string]ArtifactObject
 	artifactUsage   map[string]ArtifactUsage
 	artifactLeases  map[string]artifactLeaseState
+}
+
+// Backup writes a point-in-time copy of the append-only journal. The snapshot
+// is fsynced and atomically renamed, so a restart can safely replay it even if
+// the process is interrupted during the copy.
+func (s *JournalStore) Backup(destination string) error {
+	if s == nil || s.file == nil {
+		return errors.New("journal backup requires a file-backed store")
+	}
+	if destination == "" {
+		return errors.New("journal backup destination is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.file.Sync(); err != nil {
+		return fmt.Errorf("sync journal before backup: %w", err)
+	}
+	info, err := s.file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat journal before backup: %w", err)
+	}
+	destination = filepath.Clean(destination)
+	if destinationInfo, statErr := os.Stat(destination); statErr == nil && os.SameFile(info, destinationInfo) {
+		return errors.New("journal backup destination must differ from source")
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+		return fmt.Errorf("create journal backup directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(destination), ".journal-backup-*")
+	if err != nil {
+		return fmt.Errorf("create journal backup temporary file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := io.Copy(temporary, io.NewSectionReader(s.file, 0, info.Size())); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("copy journal backup: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync journal backup: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, destination); err != nil {
+		return fmt.Errorf("install journal backup: %w", err)
+	}
+	return nil
+}
+
+// RestoreJournalBackup validates a journal snapshot and atomically installs it
+// as the new journal path. The destination must not be an open JournalStore;
+// callers should perform restore while the Hub is stopped.
+func RestoreJournalBackup(backup, destination string) error {
+	if backup == "" || destination == "" {
+		return errors.New("journal backup and destination are required")
+	}
+	backup = filepath.Clean(backup)
+	destination = filepath.Clean(destination)
+	if backup == destination {
+		return errors.New("journal backup and destination must differ")
+	}
+	validated, err := OpenJournal(backup)
+	if err != nil {
+		return fmt.Errorf("validate journal backup: %w", err)
+	}
+	if err := validated.Close(); err != nil {
+		return fmt.Errorf("close validated journal backup: %w", err)
+	}
+	source, err := os.Open(backup)
+	if err != nil {
+		return fmt.Errorf("open journal backup: %w", err)
+	}
+	defer source.Close()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+		return fmt.Errorf("create journal restore directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(destination), ".journal-restore-*")
+	if err != nil {
+		return fmt.Errorf("create journal restore temporary file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := io.Copy(temporary, source); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("copy journal restore: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync journal restore: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, destination); err != nil {
+		return fmt.Errorf("install journal restore: %w", err)
+	}
+	return nil
 }
 
 func OpenJournal(path string) (*JournalStore, error) {
@@ -732,7 +843,7 @@ func (s *JournalStore) ClaimOutbox(
 	ids := make([]string, 0, len(s.outbox))
 	for id := range s.outbox {
 		state := s.outboxStates[id]
-		if state.Acked || state.AvailableAt.After(now) || (state.Owner != "" && state.ExpiresAt.After(now)) {
+		if state.Acked || state.DeadLettered || state.AvailableAt.After(now) || (state.Owner != "" && state.ExpiresAt.After(now)) {
 			continue
 		}
 		ids = append(ids, id)
@@ -804,12 +915,31 @@ func (s *JournalStore) RetryOutbox(_ context.Context, lease OutboxLease, availab
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, ok := s.outboxStates[lease.Item.ID]
-	if !ok || state.Owner != lease.Owner || state.Acked {
+	if !ok || state.Owner != lease.Owner || state.Acked || state.DeadLettered {
 		return ErrLeaseLost
 	}
 	state.Owner = ""
 	state.ExpiresAt = time.Time{}
 	state.AvailableAt = availableAt
+	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: lease.Item.ID, OutboxState: &state}
+	if err := s.append(record); err != nil {
+		return err
+	}
+	s.applyRecord(record)
+	return nil
+}
+
+func (s *JournalStore) DeadLetterOutbox(_ context.Context, lease OutboxLease, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.outboxStates[lease.Item.ID]
+	if !ok || state.Owner != lease.Owner || state.Acked || state.DeadLettered {
+		return ErrLeaseLost
+	}
+	state.Owner = ""
+	state.ExpiresAt = time.Time{}
+	state.DeadLettered = true
+	state.LastError = reason
 	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: lease.Item.ID, OutboxState: &state}
 	if err := s.append(record); err != nil {
 		return err

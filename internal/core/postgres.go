@@ -609,7 +609,7 @@ func (s *PostgresStore) ClaimOutbox(
 	rows, err := s.pool.Query(ctx, `
 		WITH candidates AS (
 			SELECT id FROM afh_outbox
-			WHERE acked_at IS NULL AND available_at <= $1
+			WHERE acked_at IS NULL AND dead_lettered_at IS NULL AND available_at <= $1
 			  AND (lease_owner = '' OR lease_expires_at <= $1)
 			ORDER BY available_at, created_at, id
 			FOR UPDATE SKIP LOCKED
@@ -679,7 +679,22 @@ func (s *PostgresStore) AckOutbox(ctx context.Context, lease OutboxLease) error 
 func (s *PostgresStore) RetryOutbox(ctx context.Context, lease OutboxLease, availableAt time.Time) error {
 	command, err := s.pool.Exec(ctx, `
 		UPDATE afh_outbox SET available_at=$1, lease_owner='', lease_expires_at=NULL
-		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL`, availableAt, lease.Item.ID, lease.Owner)
+		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL AND dead_lettered_at IS NULL`, availableAt, lease.Item.ID, lease.Owner)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeadLetterOutbox(ctx context.Context, lease OutboxLease, reason string) error {
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_outbox
+		SET dead_lettered_at=now(), last_error=$1, lease_owner='', lease_expires_at=NULL
+		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL AND dead_lettered_at IS NULL`,
+		reason, lease.Item.ID, lease.Owner)
 	if err != nil {
 		return err
 	}

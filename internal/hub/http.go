@@ -30,10 +30,22 @@ type HTTPHandler struct {
 	Limiter           access.RateLimiter
 	Now               func() time.Time
 	EventPollInterval time.Duration
+	Metrics           func() string
 }
 
 func (h *HTTPHandler) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+	})
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		if h.Metrics != nil {
+			_, _ = io.WriteString(w, h.Metrics())
+		}
+	})
 	mux.HandleFunc("POST /v1/agents", h.protected(access.ActionAgentRegister, h.registerAgent))
 	mux.HandleFunc("GET /v1/agents", h.protected(access.ActionAgentList, h.listAgents))
 	mux.HandleFunc("POST /v1/tasks", h.protected(access.ActionTaskSubmit, h.submitTask))

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -74,6 +75,8 @@ func main() {
 	auditTokenReference := flag.String("audit-token-ref", "", "optional SecretProvider reference for the central audit collector")
 	outboxURL := flag.String("outbox-url", "", "optional HTTPS endpoint for durable Task Event outbox delivery")
 	outboxTokenReference := flag.String("outbox-token-ref", "", "optional SecretProvider reference for the outbox endpoint Bearer token")
+	outboxMaxAttempts := flag.Uint("outbox-max-attempts", 12, "maximum Outbox delivery attempts before dead-lettering; zero means unlimited")
+	workerDrainTimeout := flag.Duration("worker-drain-timeout", 15*time.Second, "maximum time allowed for background workers to drain during shutdown")
 	flag.Parse()
 
 	store, err := openStore(context.Background(), *storageBackend, *journalPath, *postgresDSNEnv)
@@ -91,6 +94,7 @@ func main() {
 		log.Fatal("--outbox-token-ref requires --outbox-url")
 	}
 	var outboxPublisher worker.OutboxPublisher
+	outboxMetrics := &worker.OutboxMetrics{}
 	if *outboxURL != "" {
 		if err := baseSecretProvider.ValidateReference(*outboxTokenReference); err != nil && *outboxTokenReference != "" {
 			log.Fatalf("outbox token reference: %v", err)
@@ -214,7 +218,7 @@ func main() {
 	handler := (&hub.HTTPHandler{
 		Service: service, DecodePush: a2afederation.DecodePush,
 		Authenticator: authenticator, Authorizer: authorizer,
-		Audit: auditSink, Limiter: limiter,
+		Audit: auditSink, Limiter: limiter, Metrics: outboxMetrics.Prometheus,
 	}).Handler()
 	server := &http.Server{
 		Addr: *listen, Handler: handler,
@@ -249,29 +253,25 @@ func main() {
 		outbox = &worker.OutboxProcessor{
 			Store: store, Publisher: outboxPublisher, WorkerID: resolvedWorkerID + ":outbox",
 			LeaseDuration: *leaseDuration, PollInterval: time.Second,
+			MaxAttempts: uint32(*outboxMaxAttempts),
+			Metrics:     outboxMetrics,
 		}
 	}
-	go func() {
-		if err := background.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("background reconciliation stopped: %v", err)
-		}
-	}()
-	go func() {
-		if err := inbox.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Push inbox processor stopped: %v", err)
-		}
-	}()
-	go func() {
-		if err := artifactLifecycle.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Artifact lifecycle worker stopped: %v", err)
-		}
-	}()
-	if outbox != nil {
+	var workers sync.WaitGroup
+	runWorker := func(name string, run func() error) {
+		workers.Add(1)
 		go func() {
-			if err := outbox.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("outbox publisher stopped: %v", err)
+			defer workers.Done()
+			if err := run(); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("%s stopped: %v", name, err)
 			}
 		}()
+	}
+	runWorker("background reconciliation", func() error { return background.Run(ctx) })
+	runWorker("Push inbox processor", func() error { return inbox.Run(ctx) })
+	runWorker("Artifact lifecycle worker", func() error { return artifactLifecycle.Run(ctx) })
+	if outbox != nil {
+		runWorker("outbox publisher", func() error { return outbox.Run(ctx) })
 	}
 	go func() {
 		<-ctx.Done()
@@ -291,6 +291,20 @@ func main() {
 	}
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		log.Fatal(serveErr)
+	}
+	stop()
+	drainDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(drainDone)
+	}()
+	drainTimer := time.NewTimer(*workerDrainTimeout)
+	defer drainTimer.Stop()
+	select {
+	case <-drainDone:
+		log.Printf("background workers drained")
+	case <-drainTimer.C:
+		log.Printf("background worker drain timed out after %s", *workerDrainTimeout)
 	}
 }
 

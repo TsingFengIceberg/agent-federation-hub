@@ -88,6 +88,46 @@ func TestJournalReplayAndDuplicateSuppression(t *testing.T) {
 	}
 }
 
+func TestJournalBackupAndRestoreAreReplayable(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "source.journal")
+	backupPath := filepath.Join(directory, "backup", "hub.journal")
+	restoredPath := filepath.Join(directory, "restored", "hub.journal")
+	store, err := OpenJournal(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	if _, err := store.CreateTask(ctx, Task{
+		ID: "backup-task", TenantID: "tenant-a", AgentID: "agent-1",
+		State: TaskStateWorking, Delivery: DeliveryPending, CreatedAt: now, UpdatedAt: now,
+	}, Event{Type: "task.status", State: TaskStateWorking, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Backup(backupPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreJournalBackup(backupPath, restoredPath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := OpenJournal(restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	task, err := restored.GetTask(ctx, "tenant-a", "backup-task")
+	if err != nil || task.State != TaskStateWorking {
+		t.Fatalf("restored task=%+v err=%v", task, err)
+	}
+	if info, err := os.Stat(backupPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup permissions info=%v err=%v", info, err)
+	}
+}
+
 func TestTenantIsolationMasksTaskExistence(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenJournal("")

@@ -30,8 +30,8 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 	if err := first.pool.QueryRow(ctx, `SELECT count(*) FROM afh_schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount < 3 {
-		t.Fatalf("schema migration ledger rows=%d, want at least 3", migrationCount)
+	if migrationCount < 4 {
+		t.Fatalf("schema migration ledger rows=%d, want at least 4", migrationCount)
 	}
 	if err := second.Migrate(ctx); err != nil {
 		t.Fatalf("idempotent migration check failed: %v", err)
@@ -106,6 +106,27 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 		if err := second.AckOutbox(ctx, lease); err != nil {
 			t.Fatal(err)
 		}
+	}
+	deadLetterItem := OutboxItem{
+		ID: "outbox-dead-letter", TenantID: task.TenantID, TaskID: task.ID,
+		DedupKey: "dead-letter", Topic: "task.status", Payload: json.RawMessage(`{"state":"FAILED"}`), CreatedAt: now,
+	}
+	if created, err := first.EnqueueOutbox(ctx, deadLetterItem); err != nil || !created {
+		t.Fatalf("dead-letter enqueue created=%v err=%v", created, err)
+	}
+	deadLetterLease, err := first.ClaimOutbox(ctx, "publisher-dlq", 1, now, time.Minute)
+	if err != nil || len(deadLetterLease) != 1 {
+		t.Fatalf("dead-letter claim=%+v err=%v", deadLetterLease, err)
+	}
+	if err := first.DeadLetterOutbox(ctx, deadLetterLease[0], "permanent collector failure"); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := second.ClaimOutbox(ctx, "publisher-retry", 1, now.Add(time.Hour), time.Minute); err != nil || len(claim) != 0 {
+		t.Fatalf("dead-lettered outbox was claimable: %+v err=%v", claim, err)
+	}
+	var lastError string
+	if err := first.pool.QueryRow(ctx, `SELECT last_error FROM afh_outbox WHERE id=$1`, deadLetterItem.ID).Scan(&lastError); err != nil || lastError != "permanent collector failure" {
+		t.Fatalf("dead-letter reason=%q err=%v", lastError, err)
 	}
 
 	start := make(chan struct{})
