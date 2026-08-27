@@ -78,13 +78,13 @@ func (tckExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 			_ = yield(statusEvent(execCtx, a2a.TaskStateRejected), nil)
 		case strings.HasPrefix(id, "tck-artifact-text"):
 			completeWithArtifact(yield, execCtx, a2a.NewTextPart("Generated text content"))
-		case strings.HasPrefix(id, "tck-artifact-file"):
-			part := a2a.NewRawPart([]byte("tck"))
-			part.MediaType, part.Filename = "text/plain", "output.txt"
-			completeWithArtifact(yield, execCtx, part)
 		case strings.HasPrefix(id, "tck-artifact-file-url"):
 			part := a2a.NewFileURLPart(a2a.URL("https://example.com/output.txt"), "text/plain")
 			part.Filename = "output.txt"
+			completeWithArtifact(yield, execCtx, part)
+		case strings.HasPrefix(id, "tck-artifact-file"):
+			part := a2a.NewRawPart([]byte("tck"))
+			part.MediaType, part.Filename = "text/plain", "output.txt"
 			completeWithArtifact(yield, execCtx, part)
 		case strings.HasPrefix(id, "tck-artifact-data"):
 			completeWithArtifact(yield, execCtx, a2a.NewDataPart(map[string]any{"key": "value", "count": float64(42)}))

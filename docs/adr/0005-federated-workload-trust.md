@@ -49,8 +49,8 @@ restart-replayed in the development journal.
 - The implementation does not operate an identity provider, CA, policy authoring
   system, consent service, or credential vault.
 - Local process-scoped and PostgreSQL-coordinated rate limiting, plus a `0600`
-  JSONL audit sink and optional HTTPS central exporter, are implemented and
-  exercised by unit, PostgreSQL, and opt-in TLS integration tests. Real partner
+  JSONL audit sink and optional HTTPS central exporter with bounded retry, are
+  implemented and exercised by unit, PostgreSQL, and opt-in TLS integration tests. Real partner
   IdP/CA/PDP interoperability, managed-database qualification, durable audit
   export/rotation, automated certificate rollover, and outage drills remain
   gates before a production trust claim.

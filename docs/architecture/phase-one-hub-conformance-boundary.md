@@ -86,8 +86,8 @@ previously evaluated. A deterministic Go test verifies that these pins and their
 evidence status do not drift silently.
 
 The external TCK remains `unresolved-revision-skew`, not passed. The
-repository-owned JSON-RPC/SSE SUT run at the pinned TCK revision recorded 73
-passed, 8 failed, and 154 skipped scenarios. Remaining failures and the
+repository-owned JSON-RPC/SSE SUT run at the pinned TCK revision recorded 74
+passed, 7 failed, and 154 skipped scenarios. Remaining failures and the
 authentication/Push/revision waivers are machine-recorded; full conformance
 requires an aligned TCK and closure or explanation of every remaining MUST
 failure.

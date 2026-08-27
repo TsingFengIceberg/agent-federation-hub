@@ -114,3 +114,42 @@ func TestFanoutAuditSinkRetainsLocalRecordWhenCollectorFails(t *testing.T) {
 		t.Fatalf("local record content=%s err=%v", content, err)
 	}
 }
+
+func TestRetryingAuditSinkRetriesBoundedFailures(t *testing.T) {
+	var attempts int
+	sink := AuditSinkFunc(func(context.Context, AuditRecord) error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("temporary collector failure")
+		}
+		return nil
+	})
+	retrying := &RetryingAuditSink{
+		Sink: sink, Attempts: 3,
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	}
+	if err := retrying.Record(context.Background(), AuditRecord{RequestID: "retry-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts=%d, want 3", attempts)
+	}
+}
+
+func TestRetryingAuditSinkStopsAfterBound(t *testing.T) {
+	var attempts int
+	retrying := &RetryingAuditSink{
+		Sink: AuditSinkFunc(func(context.Context, AuditRecord) error {
+			attempts++
+			return errors.New("collector unavailable")
+		}),
+		Attempts: 2,
+		Sleep:    func(context.Context, time.Duration) error { return nil },
+	}
+	if err := retrying.Record(context.Background(), AuditRecord{RequestID: "retry-2"}); err == nil {
+		t.Fatal("bounded retry unexpectedly succeeded")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d, want 2", attempts)
+	}
+}

@@ -143,7 +143,7 @@ func main() {
 		if auditErr != nil {
 			log.Fatal(auditErr)
 		}
-		auditSinks = append(auditSinks, centralAudit)
+		auditSinks = append(auditSinks, &access.RetryingAuditSink{Sink: centralAudit, Attempts: 3})
 	}
 	if *authMode != "development" && *auditFile == "" {
 		log.Fatal("non-development authentication requires --audit-file")

@@ -108,6 +108,68 @@ func (s FanoutAuditSink) Record(ctx context.Context, record AuditRecord) error {
 	return combined
 }
 
+// RetryingAuditSink retries a downstream exporter for short-lived failures.
+// It is intentionally bounded and does not replace a durable outbox; callers
+// should pair it with FileAuditSink when audit loss must be recoverable.
+type RetryingAuditSink struct {
+	Sink           AuditSink
+	Attempts       int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	Sleep          func(context.Context, time.Duration) error
+}
+
+func (s *RetryingAuditSink) Record(ctx context.Context, record AuditRecord) error {
+	if s == nil || s.Sink == nil {
+		return errors.New("retrying audit sink is not configured")
+	}
+	attempts := s.Attempts
+	if attempts <= 0 {
+		attempts = 3
+	}
+	initial := s.InitialBackoff
+	if initial <= 0 {
+		initial = 100 * time.Millisecond
+	}
+	max := s.MaxBackoff
+	if max <= 0 {
+		max = 2 * time.Second
+	}
+	sleep := s.Sleep
+	if sleep == nil {
+		sleep = func(ctx context.Context, delay time.Duration) error {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		}
+	}
+	var lastErr error
+	backoff := initial
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := s.Sink.Record(ctx, record); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt == attempts {
+			break
+		}
+		if err := sleep(ctx, backoff); err != nil {
+			return fmt.Errorf("audit export retry interrupted: %w", err)
+		}
+		backoff *= 2
+		if backoff > max {
+			backoff = max
+		}
+	}
+	return fmt.Errorf("audit export failed after %d attempts: %w", attempts, lastErr)
+}
+
 // HTTPAuditSink exports redacted audit records to an HTTPS collector. The
 // caller supplies a short-lived token through a callback so credentials never
 // enter configuration structs or records.
