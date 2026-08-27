@@ -1,0 +1,13 @@
+[project]
+name = "agent-federation-hub-python-fixture"
+version = "0.1.0"
+description = "Repository-owned black-box Python A2A interoperability fixture"
+requires-python = ">=3.13"
+dependencies = [
+  "a2a-sdk[fastapi] @ git+https://github.com/a2aproject/a2a-python.git@6eee8956fa0e3d6378e4a61b52cf674d05b81229",
+  "pyyaml>=6.0.2,<7",
+  "uvicorn>=0.35.0,<1",
+]
+
+[tool.uv]
+package = false

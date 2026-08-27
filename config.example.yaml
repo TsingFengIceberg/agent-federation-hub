@@ -1,0 +1,7 @@
+model_api:
+  protocol: openai-responses
+  base_url: https://api.openai.com/v1
+  responses_path: /responses
+  model: ""
+  api_key_env: MODEL_API_KEY
+  headers: {}
