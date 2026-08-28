@@ -32,12 +32,12 @@ class SettingsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env_path = root / ".env"
-            config_path = root / "config.yaml"
+            model_config_path = root / "model_config.yaml"
             env_path.write_text("MODEL_API_KEY=test-secret\n", encoding="utf-8")
-            config_path.write_text(yaml.safe_dump(valid_config()), encoding="utf-8")
+            model_config_path.write_text(yaml.safe_dump(valid_config()), encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
-                settings = load_settings(env_path, config_path)
+                settings = load_settings(env_path, model_config_path)
 
             self.assertEqual(settings.model_api.api_key, "test-secret")
             self.assertEqual(
@@ -51,25 +51,25 @@ class SettingsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env_path = root / ".env"
-            config_path = root / "config.yaml"
+            model_config_path = root / "model_config.yaml"
             env_path.write_text("MODEL_API_KEY=test-secret\n", encoding="utf-8")
-            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            model_config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
                 with self.assertRaises(SettingsError):
-                    load_settings(env_path, config_path)
+                    load_settings(env_path, model_config_path)
 
     def test_rejects_empty_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env_path = root / ".env"
-            config_path = root / "config.yaml"
+            model_config_path = root / "model_config.yaml"
             env_path.write_text("MODEL_API_KEY=\n", encoding="utf-8")
-            config_path.write_text(yaml.safe_dump(valid_config()), encoding="utf-8")
+            model_config_path.write_text(yaml.safe_dump(valid_config()), encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
                 with self.assertRaises(SettingsError):
-                    load_settings(env_path, config_path)
+                    load_settings(env_path, model_config_path)
 
 
 class ProviderParsingTest(unittest.TestCase):

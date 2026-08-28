@@ -153,7 +153,7 @@ def create_app(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--model-config", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4103)
     parser.add_argument("--public-url", default="http://127.0.0.1:4103")
@@ -161,7 +161,7 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0)
     args = parser.parse_args()
     try:
-        settings = load_settings(args.env_file, args.config)
+        settings = load_settings(args.env_file, args.model_config)
     except SettingsError as exc:
         raise SystemExit(f"configuration error: {exc}") from exc
 

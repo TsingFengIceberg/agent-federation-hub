@@ -11,16 +11,16 @@ provider API key and has no provider-specific code.
 ## Local inputs
 
 The Agent reads model API credentials from the ignored root `.env` and
-non-secret model API settings from the ignored root `config.yaml`. Their
+non-secret model API settings from the ignored root `model_config.yaml`. Their
 committed, development-wide templates are
 [`.env.example`](../../.env.example) and
-[`config.example.yaml`](../../config.example.yaml). They intentionally contain
+[`model_config.example.yaml`](../../model_config.example.yaml). They intentionally contain
 no Agent or test-runner settings.
 
 Required local values are:
 
 - `MODEL_API_KEY` in `.env`;
-- `model_api.base_url` and `model_api.model` in `config.yaml`;
+- `model_api.base_url` and `model_api.model` in `model_config.yaml`;
 - a streaming OpenAI Responses-compatible `/responses` endpoint.
 
 `model_api.api_key_env` may name a different environment variable. Literal
@@ -43,7 +43,7 @@ Optional alternate local files can be selected without changing the repository:
 
 ```bash
 AFH_ENV_FILE=/secure/path/provider.env \
-AFH_CONFIG_FILE=/secure/path/provider.yaml \
+AFH_MODEL_CONFIG_FILE=/secure/path/provider.yaml \
 GO_BIN=/path/to/go \
 tests/real-api/run-smoke.sh
 ```

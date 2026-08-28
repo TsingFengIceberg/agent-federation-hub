@@ -35,6 +35,18 @@ type RegisterAgentInput struct {
 	CredentialEnv map[string]string `json:"credentialEnv,omitempty"`
 }
 
+// AgentRegistrationPolicy contains local constraints that a discovered
+// Agent Card must satisfy before the Agent is persisted. The remote Agent
+// Card remains authoritative for its endpoint and declared capabilities.
+type AgentRegistrationPolicy struct {
+	RequiredProtocolVersion  string
+	RequiredProtocolBinding  string
+	RequiredStreamTransport  string
+	RequireStreaming         bool
+	RequirePushNotifications bool
+	RequiredSkills           []string
+}
+
 type SubmitTaskInput struct {
 	AgentID    string `json:"agentId"`
 	Text       string `json:"text"`
@@ -49,6 +61,10 @@ type RevokeTokenInput struct {
 }
 
 func (s *Service) RegisterAgent(ctx context.Context, tenantID string, input RegisterAgentInput) (core.Agent, error) {
+	return s.RegisterAgentWithPolicy(ctx, tenantID, input, AgentRegistrationPolicy{})
+}
+
+func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, input RegisterAgentInput, policy AgentRegistrationPolicy) (core.Agent, error) {
 	if tenantID == "" {
 		return core.Agent{}, errors.New("tenant ID is required")
 	}
@@ -58,6 +74,24 @@ func (s *Service) RegisterAgent(ctx context.Context, tenantID string, input Regi
 	descriptor, err := s.Adapter.Discover(ctx, input.CardURL)
 	if err != nil {
 		return core.Agent{}, err
+	}
+	if policy.RequiredProtocolVersion != "" && descriptor.ProtocolVersion != policy.RequiredProtocolVersion {
+		return core.Agent{}, fmt.Errorf("remote Agent protocol version %q does not match required %q", descriptor.ProtocolVersion, policy.RequiredProtocolVersion)
+	}
+	if policy.RequiredProtocolBinding != "" && descriptor.ProtocolBinding != policy.RequiredProtocolBinding {
+		return core.Agent{}, fmt.Errorf("remote Agent protocol binding %q does not match required %q", descriptor.ProtocolBinding, policy.RequiredProtocolBinding)
+	}
+	if policy.RequiredStreamTransport != "" && policy.RequiredStreamTransport != "SSE" {
+		return core.Agent{}, fmt.Errorf("unsupported required stream transport %q", policy.RequiredStreamTransport)
+	}
+	if policy.RequireStreaming && !descriptor.Streaming {
+		return core.Agent{}, errors.New("remote Agent does not declare streaming support")
+	}
+	if policy.RequirePushNotifications && !descriptor.PushNotifications {
+		return core.Agent{}, errors.New("remote Agent does not declare Push support")
+	}
+	if missing := missingSkills(policy.RequiredSkills, descriptor.Skills); len(missing) > 0 {
+		return core.Agent{}, fmt.Errorf("remote Agent does not declare required skills: %s", strings.Join(missing, ", "))
 	}
 	if err := validateHTTPURL(descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
 		return core.Agent{}, fmt.Errorf("Agent endpoint URL: %w", err)
@@ -90,13 +124,28 @@ func (s *Service) RegisterAgent(ctx context.Context, tenantID string, input Regi
 		ProtocolBinding: descriptor.ProtocolBinding, ProtocolVersion: descriptor.ProtocolVersion,
 		Endpoint: descriptor.Endpoint, Streaming: descriptor.Streaming,
 		PushNotifications: descriptor.PushNotifications,
-		SecuritySchemes:   descriptor.SecuritySchemes, CredentialEnv: credentialEnv,
-		CreatedAt: now, UpdatedAt: now,
+		SecuritySchemes:   descriptor.SecuritySchemes, Skills: descriptor.Skills,
+		CredentialEnv: credentialEnv,
+		CreatedAt:     now, UpdatedAt: now,
 	}
 	if err := s.Store.PutAgent(ctx, agent); err != nil {
 		return core.Agent{}, err
 	}
 	return agent, nil
+}
+
+func missingSkills(required, declared []string) []string {
+	set := make(map[string]struct{}, len(declared))
+	for _, skill := range declared {
+		set[skill] = struct{}{}
+	}
+	missing := make([]string, 0)
+	for _, skill := range required {
+		if _, ok := set[skill]; !ok {
+			missing = append(missing, skill)
+		}
+	}
+	return missing
 }
 
 func (s *Service) ListAgents(ctx context.Context, tenantID string) ([]core.Agent, error) {

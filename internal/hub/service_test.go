@@ -110,6 +110,36 @@ func registerTestAgent(t *testing.T, service *Service, tenantID string) core.Age
 	return agent
 }
 
+func TestRegisterAgentWithPolicyChecksDiscoveredCard(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	adapter := &fakeAdapter{descriptor: federation.Descriptor{
+		Name: "research", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0",
+		Endpoint: "https://agent.example/a2a", Streaming: true,
+		Skills: []string{"research"},
+	}}
+	service := newTestService(t, store, adapter)
+	agent, err := service.RegisterAgentWithPolicy(context.Background(), "tenant-a", RegisterAgentInput{
+		ID: "agent-policy", CardURL: "https://agent.example/card.json",
+	}, AgentRegistrationPolicy{
+		RequiredProtocolVersion: "1.0", RequiredProtocolBinding: "JSONRPC",
+		RequiredStreamTransport: "SSE", RequireStreaming: true,
+		RequiredSkills: []string{"research"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.Skills) != 1 || agent.Skills[0] != "research" {
+		t.Fatalf("agent skills=%v", agent.Skills)
+	}
+
+	if _, err := service.RegisterAgentWithPolicy(context.Background(), "tenant-a", RegisterAgentInput{
+		ID: "agent-missing-skill", CardURL: "https://agent.example/card.json",
+	}, AgentRegistrationPolicy{RequiredSkills: []string{"finance"}}); err == nil {
+		t.Fatal("missing required skill was accepted")
+	}
+}
+
 func TestSubmitDisconnectWithKnownRemoteTaskReconcilesWithoutResend(t *testing.T) {
 	store, _ := core.OpenJournal("")
 	defer store.Close()

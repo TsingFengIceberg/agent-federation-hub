@@ -72,16 +72,16 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(name, value)
 
 
-def load_settings(env_path: Path, config_path: Path) -> Settings:
+def load_settings(env_path: Path, model_config_path: Path) -> Settings:
     load_dotenv(env_path)
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(model_config_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise SettingsError(
-            f"configuration file does not exist: {config_path}"
+            f"configuration file does not exist: {model_config_path}"
         ) from exc
     except yaml.YAMLError as exc:
-        raise SettingsError(f"invalid YAML in {config_path}") from exc
+        raise SettingsError(f"invalid YAML in {model_config_path}") from exc
 
     root = require_object(raw, "configuration")
     model_api_raw = require_object(root.get("model_api"), "model_api")
@@ -154,10 +154,10 @@ def require_http_url(value: str, field: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--model-config", type=Path, required=True)
     args = parser.parse_args()
     try:
-        settings = load_settings(args.env_file, args.config)
+        settings = load_settings(args.env_file, args.model_config)
     except SettingsError as exc:
         raise SystemExit(f"configuration error: {exc}") from exc
 

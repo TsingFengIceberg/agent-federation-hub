@@ -9,6 +9,7 @@
 | [`architecture/a2a-v1-go-python-decision-gate.md`](architecture/a2a-v1-go-python-decision-gate.md) | Product architecture evidence and pending language decision gates | verified test evidence / decision pending |
 | [`architecture/opaque-agent-federation-review.md`](architecture/opaque-agent-federation-review.md) | Evidence review and product contract for opaque remote Agent federation | verified source review / draft architecture |
 | [`architecture/phase-one-hub-conformance-boundary.md`](architecture/phase-one-hub-conformance-boundary.md) | Executable Hub slice and explicit production/conformance gaps | implemented initial slice / gaps explicit |
+| [`architecture/agent-configuration.md`](architecture/agent-configuration.md) | Versioned remote Agent registration configuration, discovery constraints, and startup loading | implemented initial loader / runtime reconciliation pending |
 | [`adr/0001-a2a-v1-jsonrpc-sse-profile.md`](adr/0001-a2a-v1-jsonrpc-sse-profile.md) | Initial A2A v1 external wire profile and explicit deferrals | accepted / implementation coverage partial |
 | [`adr/0002-durable-federation-task-reconciliation.md`](adr/0002-durable-federation-task-reconciliation.md) | Durable observable-state and ambiguous-delivery recovery rules | accepted for initial slice |
 | [`adr/0003-authenticated-principal-and-policy-boundary.md`](adr/0003-authenticated-principal-and-policy-boundary.md) | Authenticated Principal, policy, audit, and SecretProvider boundary | accepted / implemented initial boundary |

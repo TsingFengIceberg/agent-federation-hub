@@ -17,6 +17,7 @@ type Descriptor struct {
 	Streaming         bool
 	PushNotifications bool
 	SecuritySchemes   []string
+	Skills            []string
 }
 
 type Message struct {

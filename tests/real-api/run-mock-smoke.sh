@@ -6,7 +6,7 @@ python_project="$repo_root/tests/interop/python-agent"
 python_bin="$python_project/.venv/bin/python"
 run_dir=$(mktemp -d -t agent-federation-hub-provider-mock.XXXXXX)
 env_file="$run_dir/mock.env"
-config_file="$run_dir/mock-config.yaml"
+model_config_file="$run_dir/mock-model-config.yaml"
 provider_pid=""
 
 cleanup() {
@@ -29,7 +29,7 @@ printf '%s\n' \
   '  model: mock-model' \
   '  api_key_env: MODEL_API_KEY' \
   '  headers: {}' \
-  >"$config_file"
+  >"$model_config_file"
 
 "$python_bin" tests/real-api/mock_provider.py \
   >"$run_dir/mock-provider.log" 2>&1 &
@@ -46,5 +46,5 @@ until curl --fail --silent http://127.0.0.1:4199/health >/dev/null; do
   sleep 0.1
 done
 
-AFH_ENV_FILE="$env_file" AFH_CONFIG_FILE="$config_file" \
+AFH_ENV_FILE="$env_file" AFH_MODEL_CONFIG_FILE="$model_config_file" \
   "$repo_root/tests/real-api/run-smoke.sh"

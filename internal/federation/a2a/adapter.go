@@ -70,13 +70,18 @@ func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Desc
 		schemes = append(schemes, string(name))
 	}
 	sort.Strings(schemes)
+	skills := make([]string, 0, len(card.Skills))
+	for _, skill := range card.Skills {
+		skills = append(skills, string(skill.ID))
+	}
+	sort.Strings(skills)
 	return federation.Descriptor{
 		Name: card.Name, ProviderVersion: card.Version,
 		ProtocolBinding: string(endpoint.ProtocolBinding),
 		ProtocolVersion: string(endpoint.ProtocolVersion), Endpoint: endpoint.URL,
 		Streaming:         card.Capabilities.Streaming,
 		PushNotifications: card.Capabilities.PushNotifications,
-		SecuritySchemes:   schemes,
+		SecuritySchemes:   schemes, Skills: skills,
 	}, nil
 }
 

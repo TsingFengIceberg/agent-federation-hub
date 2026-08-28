@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/agentconfig"
 	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	a2afederation "github.com/TsingFengIceberg/agent-federation-hub/internal/federation/a2a"
@@ -29,6 +30,7 @@ func main() {
 	storageBackend := flag.String("storage", "journal", "storage backend: journal or postgres")
 	postgresDSNEnv := flag.String("postgres-dsn-env", "AFH_POSTGRES_DSN", "environment variable containing the PostgreSQL DSN")
 	publicBaseURL := flag.String("public-base-url", "", "public HTTPS base URL used for optional A2A Push callbacks")
+	agentConfigPath := flag.String("agent-config", "agent_config.yaml", "YAML file containing operator-owned remote Agent registrations")
 	allowPrivateAgentURLs := flag.Bool("allow-private-agent-urls", false, "allow HTTP or private Agent Card URLs for local development")
 	credentialEnvAllowlist := flag.String("credential-env-allowlist", "", "comma-separated credential environment variable names tenants may reference")
 	authMode := flag.String("auth-mode", "oidc", "inbound authentication mode: oidc, mtls, oidc-or-mtls, jwt-static, or development")
@@ -185,6 +187,30 @@ func main() {
 		AllowPrivateAgentURLs: *allowPrivateAgentURLs,
 		Secrets:               secretProvider,
 		Artifacts:             artifacts,
+	}
+	if *agentConfigPath != "" {
+		configuredAgents, configErr := agentconfig.LoadFile(*agentConfigPath)
+		if configErr != nil {
+			if !errors.Is(configErr, os.ErrNotExist) {
+				log.Fatal(configErr)
+			}
+			log.Printf("Agent configuration %q does not exist; continuing without configured Agents", *agentConfigPath)
+		} else {
+			for _, registration := range configuredAgents.EnabledAgents() {
+				if registration.AllowsPrivateURLs(configuredAgents.Defaults) && !*allowPrivateAgentURLs {
+					log.Fatalf("configured Agent %q allows private URLs; pass --allow-private-agent-urls for local development", registration.ID)
+				}
+				registered, registerErr := service.RegisterAgentWithPolicy(
+					context.Background(), registration.TenantID,
+					hub.RegisterAgentInput{ID: registration.ID, CardURL: registration.CardURL, CredentialEnv: registration.CredentialEnv},
+					registration.RegistrationPolicy(configuredAgents.Defaults),
+				)
+				if registerErr != nil {
+					log.Fatalf("register configured Agent %q: %v", registration.ID, registerErr)
+				}
+				log.Printf("registered configured Agent %q (%s)", registered.ID, registered.Name)
+			}
+		}
 	}
 	revocations, ok := store.(core.RevocationStore)
 	if !ok {

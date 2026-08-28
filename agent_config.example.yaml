@@ -1,0 +1,75 @@
+schema_version: 1
+
+# External Agent registrations are kept separate from model API settings.
+# The local agent_config.yaml is ignored and may contain deployment-specific
+# endpoints, authentication references, and routing policy.
+
+defaults:
+  protocol:
+    kind: a2a
+    profiles:
+      - protocol_version: "1.0"
+        binding: JSONRPC
+        stream_transport: SSE
+  discovery:
+    refresh_interval_seconds: 300
+    max_card_bytes: 262144
+    require_https: true
+    allow_private_urls: false
+  execution:
+    remote_timeout_seconds: 30
+    task_timeout_seconds: 1800
+    max_retries: 2
+    cancel_grace_seconds: 10
+    reconnect: true
+  limits:
+    max_concurrent_tasks: 16
+    max_artifact_bytes: 10485760
+
+agents:
+  # Copy this entry into agent_config.yaml and set enabled: true after the
+  # provider exposes a standards-compatible Agent Card.
+  - id: competitive-analysis-agent
+    tenant_id: partner-ca
+    display_name: Competitive Analysis Agent
+    enabled: false
+    card_url: https://ca-agent.example.com/.well-known/agent-card.json
+
+    # The Agent Card is authoritative for the selected endpoint, protocol
+    # version, capabilities, and declared security schemes. These values are
+    # local policy constraints, not a second copy of the Agent Card.
+    protocol:
+      required_profiles:
+        - protocol_version: "1.0"
+          binding: JSONRPC
+          stream_transport: SSE
+    discovery:
+      required_capabilities:
+        streaming: true
+        push_notifications: false
+      required_skills:
+        - competitive-analysis
+
+    # Values are SecretProvider references, never literal credentials. The
+    # map key must exactly match a security scheme declared by the Agent Card.
+    credential_env: {}
+    # credential_env:
+    #   oauth: CA_AGENT_A2A_TOKEN
+
+    execution:
+      remote_timeout_seconds: 30
+      task_timeout_seconds: 1800
+      max_retries: 2
+      cancel_grace_seconds: 10
+      reconnect: true
+    limits:
+      max_concurrent_tasks: 4
+      max_artifact_bytes: 10485760
+    routing:
+      tags:
+        - competitive-analysis
+        - research
+      priority: 100
+    metadata:
+      owner: partner-team
+      environment: production

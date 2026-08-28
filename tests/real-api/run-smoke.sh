@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 go_bin=${GO_BIN:-go}
 env_file=${AFH_ENV_FILE:-$repo_root/.env}
-config_file=${AFH_CONFIG_FILE:-$repo_root/config.yaml}
+model_config_file=${AFH_MODEL_CONFIG_FILE:-$repo_root/model_config.yaml}
 agent_host=${AFH_AGENT_HOST:-127.0.0.1}
 agent_port=${AFH_AGENT_PORT:-4103}
 public_url=${AFH_AGENT_PUBLIC_URL:-http://127.0.0.1:4103}
@@ -30,11 +30,11 @@ trap cleanup EXIT
 cd "$repo_root"
 uv sync --locked --project "$python_project"
 "$python_bin" tests/real-api/settings.py \
-  --env-file "$env_file" --config "$config_file" >/dev/null
+  --env-file "$env_file" --model-config "$model_config_file" >/dev/null
 "$go_bin" build -o "$hub_bin" ./cmd/interop-hub
 
 "$python_bin" tests/real-api/agent.py \
-  --env-file "$env_file" --config "$config_file" \
+  --env-file "$env_file" --model-config "$model_config_file" \
   --host "$agent_host" --port "$agent_port" --public-url "$public_url" \
   --provider-timeout "$timeout_seconds" --temperature "$temperature" \
   >"$run_dir/live-agent.log" 2>&1 &

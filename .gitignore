@@ -1,7 +1,8 @@
 .env
 .env.*
 !.env.example
-config.yaml
+model_config.yaml
+agent_config.yaml
 .venv/
 venv/
 __pycache__/

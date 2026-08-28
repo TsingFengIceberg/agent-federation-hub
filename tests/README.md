@@ -76,12 +76,15 @@ AFH_RUN_TRUST_TESTS=1 go test ./internal/hub -run TestRealTrustBundleWithOIDCMTL
 
 - [`.env.example`](../.env.example) declares secret variable names with empty
   values. The ignored root `.env` contains actual model API credentials.
-- [`config.example.yaml`](../config.example.yaml) documents non-secret model API
-  settings. The ignored root `config.yaml` contains the active API endpoint,
+- [`model_config.example.yaml`](../model_config.example.yaml) documents non-secret model API
+  settings. The ignored root `model_config.yaml` contains the active API endpoint,
   protocol adapter, model, and non-secret compatibility headers.
 - These root files are shared development configuration, not test-specific
   configuration. Agent addresses, ports, prompts, timeouts, and test behavior
   remain in command-line flags or test-script environment variables.
+- [`agent_config.example.yaml`](../agent_config.example.yaml) is the committed
+  template for external Agent registrations. The local `agent_config.yaml` is
+  ignored and is reserved for deployment-specific Agent endpoints and policy.
 - API keys must not be placed in YAML configuration, A2A Messages, Artifacts,
   logs, or committed test output.
 - `model_api.headers` is for non-secret routing or compatibility headers only.

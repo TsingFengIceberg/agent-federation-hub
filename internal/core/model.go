@@ -85,6 +85,7 @@ type Agent struct {
 	Streaming         bool              `json:"streaming"`
 	PushNotifications bool              `json:"pushNotifications"`
 	SecuritySchemes   []string          `json:"securitySchemes,omitempty"`
+	Skills            []string          `json:"skills,omitempty"`
 	CredentialEnv     map[string]string `json:"credentialEnv,omitempty"`
 	CreatedAt         time.Time         `json:"createdAt"`
 	UpdatedAt         time.Time         `json:"updatedAt"`
