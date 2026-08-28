@@ -72,6 +72,7 @@ func (h *HTTPHandler) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/agents", h.protected(access.ActionAgentRegister, h.registerAgent))
 	mux.HandleFunc("GET /v1/agents", h.protected(access.ActionAgentList, h.listAgents))
 	mux.HandleFunc("POST /v1/tasks", h.protected(access.ActionTaskSubmit, h.submitTask))
+	mux.HandleFunc("POST /v1/tasks/{taskID}/messages", h.protected(access.ActionTaskContinue, h.continueTask))
 	mux.HandleFunc("GET /v1/tasks/{taskID}", h.protected(access.ActionTaskRead, h.getTask))
 	mux.HandleFunc("GET /v1/tasks/{taskID}/events", h.protected(access.ActionTaskEvents, h.getEvents))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/cancel", h.protected(access.ActionTaskCancel, h.cancelTask))
@@ -244,6 +245,23 @@ func (h *HTTPHandler) submitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := h.Service.SubmitTask(r.Context(), tenantID, input)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, task)
+}
+
+func (h *HTTPHandler) continueTask(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	var input ContinueTaskInput
+	if !h.decodeJSON(w, r, &input) {
+		return
+	}
+	task, err := h.Service.ContinueTask(r.Context(), tenantID, r.PathValue("taskID"), input)
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -472,6 +490,8 @@ func (h *HTTPHandler) writeError(w http.ResponseWriter, err error) {
 		} else if category == "state" {
 			status = http.StatusConflict
 		}
+	case strings.Contains(err.Error(), "task continuation requires"):
+		status, category, code, message = http.StatusConflict, "state", "TASK_CONTINUATION_NOT_ALLOWED", err.Error()
 	case strings.Contains(err.Error(), "required"), strings.Contains(err.Error(), "invalid"),
 		strings.Contains(err.Error(), "does not declare"), strings.Contains(err.Error(), "not allowed"):
 		status, category, code, message = http.StatusBadRequest, "validation", "INVALID_REQUEST", err.Error()

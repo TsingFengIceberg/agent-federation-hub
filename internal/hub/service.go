@@ -53,6 +53,10 @@ type SubmitTaskInput struct {
 	EnablePush bool   `json:"enablePush,omitempty"`
 }
 
+type ContinueTaskInput struct {
+	Text string `json:"text"`
+}
+
 type RevokeTokenInput struct {
 	Issuer    string    `json:"issuer"`
 	TokenID   string    `json:"tokenId"`
@@ -284,6 +288,51 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 
 func (s *Service) GetTask(ctx context.Context, tenantID, taskID string) (core.Task, error) {
 	return s.Store.GetTask(ctx, tenantID, taskID)
+}
+
+// ContinueTask sends a follow-up A2A Message on an existing provider-owned
+// Task. The remote Task and Context IDs are retained by the Hub; callers only
+// provide the new text and the Hub continues to reconcile the same Task.
+func (s *Service) ContinueTask(ctx context.Context, tenantID, taskID string, input ContinueTaskInput) (core.Task, error) {
+	if strings.TrimSpace(input.Text) == "" {
+		return core.Task{}, errors.New("continuation text is required")
+	}
+	task, err := s.Store.GetTask(ctx, tenantID, taskID)
+	if err != nil {
+		return core.Task{}, err
+	}
+	if task.RemoteTaskID == "" || task.RemoteContextID == "" {
+		return task, errors.New("task has no remote Task and Context IDs")
+	}
+	if task.State != core.TaskStateInputRequired {
+		return task, fmt.Errorf("task continuation requires INPUT_REQUIRED state, got %s", task.State)
+	}
+	agent, err := s.Store.GetAgent(ctx, tenantID, task.AgentID)
+	if err != nil {
+		return task, err
+	}
+	message := federation.Message{
+		ID:                core.NewID(),
+		Text:              input.Text,
+		RemoteTaskID:      task.RemoteTaskID,
+		RemoteContextID:   task.RemoteContextID,
+		ReturnImmediately: true,
+	}
+	seen := false
+	for observation, observationErr := range s.Adapter.Send(ctx, agent, message) {
+		if observationErr != nil {
+			return task, observationErr
+		}
+		seen = true
+		task, err = s.applyObservation(ctx, task, observation)
+		if err != nil {
+			return task, err
+		}
+	}
+	if !seen {
+		return task, errors.New("remote Agent returned no continuation result")
+	}
+	return task, nil
 }
 
 func (s *Service) EventsAfter(ctx context.Context, tenantID, taskID string, after uint64) ([]core.Event, error) {

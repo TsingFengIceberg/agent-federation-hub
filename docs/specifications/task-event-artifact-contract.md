@@ -114,6 +114,16 @@ Cancellation first records `cancelRequested=true`, then invokes the provider.
 Only an observed provider state changes the Task to `CANCELED`; a transport error
 leaves cancellation unconfirmed and records a sanitized Problem.
 
+An `INPUT_REQUIRED` Task is resumed through the Hub continuation endpoint
+`POST /v1/tasks/{taskID}/messages` with `{"text":"..."}`. The endpoint is
+authorized and tenant-scoped like other Task operations, requires non-empty
+text, and requires both persisted `remoteTaskId` and `remoteContextId`. It
+sends a new A2A Message with those existing identifiers and
+`ReturnImmediately=true`, then applies the provider observation to the same
+local Task. A completed, failed, canceled, rejected, or otherwise non-input
+required Task is not continued; callers receive a state conflict rather than
+silently creating a new Task.
+
 ## Tenant and Credential Rules
 
 All Agent, Task, Event, cancellation, reconciliation, and Push lookups are
@@ -137,7 +147,8 @@ declared credential requirements, JWT and scope failures, audit redaction,
 sanitized error categories, tenant isolation, Push token/payload/inbox controls,
 leases and worker heartbeat, AAMP lifecycle mapping, Artifact externalization,
 content policy, scanning, quarantine, quota, URI controls, and tenant-scoped
-downloads. PostgreSQL 17 integration tests add transaction rollback and real
+downloads, plus HTTP `INPUT_REQUIRED` continuation and a two-provider
+tenant-isolation flow. PostgreSQL 17 integration tests add transaction rollback and real
 two-connection-pool Task/Artifact lease exclusion; MinIO integration performs
 actual S3-compatible object operations.
 
@@ -145,3 +156,5 @@ See [`internal/core/store_test.go`](../../internal/core/store_test.go),
 [`internal/hub/service_test.go`](../../internal/hub/service_test.go),
 [`internal/hub/http_test.go`](../../internal/hub/http_test.go), and
 [`tests/postgres/run-integration.sh`](../../tests/postgres/run-integration.sh).
+The two-provider tenant-isolation and continuation smoke is
+[`tests/hub/run-multi-agent-smoke.sh`](../../tests/hub/run-multi-agent-smoke.sh).

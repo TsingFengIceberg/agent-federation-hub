@@ -49,6 +49,7 @@ const (
 	ActionAgentRegister  Action = "agent.register"
 	ActionAgentList      Action = "agent.list"
 	ActionTaskSubmit     Action = "task.submit"
+	ActionTaskContinue   Action = "task.continue"
 	ActionTaskRead       Action = "task.read"
 	ActionTaskEvents     Action = "task.events"
 	ActionTaskCancel     Action = "task.cancel"
@@ -76,6 +77,7 @@ func DefaultScopeAuthorizer() *ScopeAuthorizer {
 		ActionAgentRegister:  "agents:write",
 		ActionAgentList:      "agents:read",
 		ActionTaskSubmit:     "tasks:submit",
+		ActionTaskContinue:   "tasks:continue",
 		ActionTaskRead:       "tasks:read",
 		ActionTaskEvents:     "tasks:read",
 		ActionTaskCancel:     "tasks:cancel",

@@ -90,6 +90,72 @@ func TestHTTPRequiresTenantAndRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestHTTPTaskContinuationPreservesRemoteCorrelation(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	adapter := &fakeAdapter{
+		descriptor: federation.Descriptor{Name: "remote", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
+		send: func(_ context.Context, _ core.Agent, message federation.Message) iter.Seq2[federation.Observation, error] {
+			if message.RemoteTaskID == "" {
+				return sequence(federation.Observation{
+					DedupKey: "input-required", Source: "a2a", RemoteTaskID: "remote-1",
+					RemoteContextID: "context-1", State: core.TaskStateInputRequired,
+				})
+			}
+			if message.RemoteTaskID != "remote-1" || message.RemoteContextID != "context-1" || !message.ReturnImmediately {
+				return sequence(errors.New("continuation correlation was not preserved"))
+			}
+			return sequence(federation.Observation{
+				DedupKey: "completed", Source: "a2a", RemoteTaskID: "remote-1",
+				RemoteContextID: "context-1", State: core.TaskStateCompleted,
+			})
+		},
+	}
+	service := newTestService(t, store, adapter)
+	handler := testHTTPHandler(service, nil, 0)
+
+	response := request(t, handler, http.MethodPost, "/v1/agents", `{"id":"agent-1","cardUrl":"https://agent.example/card.json"}`, "tenant-a", nil)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/tasks", `{"agentId":"agent-1","text":"needs confirmation"}`, "tenant-a", nil)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("submit status=%d body=%s", response.Code, response.Body.String())
+	}
+	var paused core.Task
+	if err := json.Unmarshal(response.Body.Bytes(), &paused); err != nil {
+		t.Fatal(err)
+	}
+	if paused.State != core.TaskStateInputRequired || paused.RemoteTaskID != "remote-1" || paused.RemoteContextID != "context-1" {
+		t.Fatalf("paused task=%+v", paused)
+	}
+
+	response = request(t, handler, http.MethodPost, "/v1/tasks/"+paused.ID+"/messages", `{"text":"confirm"}`, "tenant-a", nil)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("continue status=%d body=%s", response.Code, response.Body.String())
+	}
+	var completed core.Task
+	if err := json.Unmarshal(response.Body.Bytes(), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.State != core.TaskStateCompleted || completed.RemoteTaskID != paused.RemoteTaskID || completed.RemoteContextID != paused.RemoteContextID {
+		t.Fatalf("completed task=%+v", completed)
+	}
+
+	response = request(t, handler, http.MethodPost, "/v1/tasks/"+paused.ID+"/messages", `{"text":"late"}`, "tenant-a", nil)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "TASK_CONTINUATION_NOT_ALLOWED") {
+		t.Fatalf("terminal continuation status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/tasks/"+paused.ID+"/messages", `{"text":"cross-tenant"}`, "tenant-b", nil)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant continuation status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/tasks/"+paused.ID+"/messages", `{"text":""}`, "tenant-a", nil)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("empty continuation status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestHTTPPushSecurityAndSizeLimit(t *testing.T) {
 	store, _ := core.OpenJournal("")
 	defer store.Close()

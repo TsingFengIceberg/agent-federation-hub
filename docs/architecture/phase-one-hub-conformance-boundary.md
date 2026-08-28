@@ -16,6 +16,7 @@ POST /v1/tasks
 GET  /v1/tasks/{id}
 GET  /v1/tasks/{id}/events
 POST /v1/tasks/{id}/cancel
+POST /v1/tasks/{id}/messages
 POST /v1/tasks/{id}/reconcile
 POST /v1/tasks/{id}/push
 ```
@@ -31,6 +32,14 @@ Event stream with `follow=true`. `after` and `Last-Event-ID` resume after a
 durable cursor. The first fan-out implementation polls the Store and has no
 explicit backpressure policy; it remains independent of the process that
 accepted the original Task.
+
+When a remote Task is `INPUT_REQUIRED`, callers continue it with
+`POST /v1/tasks/{id}/messages` and a JSON body containing non-empty `text`.
+The Hub requires the local Task to retain both the provider `taskId` and
+`contextId`, reuses those identifiers for the A2A Message, and returns the
+updated local snapshot. Continuation is tenant-scoped and rejected with `409`
+unless the Task is currently `INPUT_REQUIRED`; it never creates a replacement
+Task or exposes provider-private workflow state.
 
 ## Boundary Matrix
 
@@ -111,3 +120,14 @@ observable working, input-required, and terminal states; body, structured result
 and attachments become Artifact Parts. The AAMP mailbox thread remains its
 authoritative asynchronous control plane. It does not become an in-domain Agent
 orchestration runtime, and no SMTP/JMAP compatibility claim is made yet.
+
+## External Provider Readiness Note
+
+The 2026-08-28 real ca-agent smoke completed A2A discovery, immediate
+acknowledgement, SSE reconciliation, and Artifact delivery, but its provider
+log also emitted a SQLite thread-affinity warning from the provider heartbeat
+worker (`sqlite3.ProgrammingError: SQLite objects created in a thread can only
+be used in that same thread`). This did not prevent that run from completing,
+but it is an external Provider readiness issue and is not a Hub fix or a
+production qualification. The ca-agent project must correct and retest its
+database connection ownership before being treated as production-ready.
