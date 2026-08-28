@@ -31,6 +31,23 @@ func TestSelectEndpointRequiresExactJSONRPCV1(t *testing.T) {
 	}
 }
 
+func TestSelectEndpointAcceptsPythonSDKJSONRPCSpelling(t *testing.T) {
+	card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{
+		{URL: "https://agent.example", ProtocolBinding: a2a.TransportProtocol("JSON_RPC"), ProtocolVersion: "1.0"},
+	}}
+	endpoint, _, err := selectEndpointForProfiles(card, []BindingProfile{InitialBindingProfile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint.URL != "https://agent.example" {
+		t.Fatalf("selected endpoint=%+v", endpoint)
+	}
+	normalizeCardBindings(card)
+	if card.SupportedInterfaces[0].ProtocolBinding != a2a.TransportProtocolJSONRPC {
+		t.Fatalf("normalized binding=%q", card.SupportedInterfaces[0].ProtocolBinding)
+	}
+}
+
 func TestConfiguredProfilesSelectHTTPJSONWithoutSDKFallback(t *testing.T) {
 	card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{
 		{URL: "https://agent.example/rest", ProtocolBinding: a2a.TransportProtocolHTTPJSON, ProtocolVersion: a2a.Version},

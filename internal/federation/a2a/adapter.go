@@ -77,7 +77,7 @@ func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Desc
 	sort.Strings(skills)
 	return federation.Descriptor{
 		Name: card.Name, ProviderVersion: card.Version,
-		ProtocolBinding: string(endpoint.ProtocolBinding),
+		ProtocolBinding: string(normalizeBinding(string(endpoint.ProtocolBinding))),
 		ProtocolVersion: string(endpoint.ProtocolVersion), Endpoint: endpoint.URL,
 		Streaming:         card.Capabilities.Streaming,
 		PushNotifications: card.Capabilities.PushNotifications,
@@ -101,11 +101,12 @@ func (a *Adapter) client(ctx context.Context, agent core.Agent) (*a2aclient.Clie
 	if err != nil {
 		return nil, ctx, mapError(err, false)
 	}
+	normalizeCardBindings(card)
 	endpoint, profile, err := selectEndpointForProfiles(card, a.profiles)
 	if err != nil {
 		return nil, ctx, profileSelectionError(err)
 	}
-	if endpoint.URL != agent.Endpoint || string(endpoint.ProtocolBinding) != agent.ProtocolBinding ||
+	if endpoint.URL != agent.Endpoint || string(normalizeBinding(string(endpoint.ProtocolBinding))) != agent.ProtocolBinding ||
 		string(endpoint.ProtocolVersion) != agent.ProtocolVersion {
 		return nil, ctx, &federation.Error{Problem: core.Problem{
 			Category: "protocol", Code: "AGENT_INTERFACE_CHANGED",
@@ -223,6 +224,24 @@ func (a *Adapter) Send(ctx context.Context, agent core.Agent, message federation
 			}
 		}
 		request := &a2a.SendMessageRequest{Message: requestMessage, Config: config}
+		if message.ReturnImmediately {
+			// A non-streaming SendMessage is the portable A2A fast-ack path. Some
+			// providers keep a streaming response open for the entire workflow even
+			// when ReturnImmediately is set; using SendMessage here lets the Hub
+			// acknowledge the remote Task and reconcile it asynchronously.
+			result, sendErr := client.SendMessage(callCtx, request)
+			if sendErr != nil {
+				yield(federation.Observation{}, mapError(sendErr, false))
+				return
+			}
+			observation, convertErr := observationFromEvent(result)
+			if convertErr != nil {
+				yield(federation.Observation{}, convertErr)
+				return
+			}
+			yield(observation, nil)
+			return
+		}
 		for event, eventErr := range client.SendStreamingMessage(callCtx, request) {
 			if eventErr != nil {
 				yield(federation.Observation{}, mapError(eventErr, true))

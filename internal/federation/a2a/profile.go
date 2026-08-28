@@ -45,10 +45,37 @@ func selectEndpointForProfiles(card *a2a.AgentCard, profiles []BindingProfile) (
 		}
 		for _, endpoint := range card.SupportedInterfaces {
 			if endpoint != nil && string(endpoint.ProtocolVersion) == profile.ProtocolVersion &&
-				endpoint.ProtocolBinding == profile.Binding {
+				normalizeBinding(string(endpoint.ProtocolBinding)) == normalizeBinding(string(profile.Binding)) {
 				return endpoint, profile, nil
 			}
 		}
 	}
 	return nil, BindingProfile{}, fmt.Errorf("Agent Card has no supported configured A2A binding profile")
+}
+
+// normalizeBinding accepts the spelling emitted by the Python A2A SDK
+// (JSON_RPC) as well as the canonical Go SDK value (JSONRPC). Binding aliases
+// are normalized only at the interoperability boundary; stored profiles and
+// internal routing continue to use the Go SDK constants.
+func normalizeBinding(value string) a2a.TransportProtocol {
+	compact := strings.ToUpper(strings.NewReplacer("_", "", "-", "", "+", "").Replace(strings.TrimSpace(value)))
+	switch compact {
+	case "JSONRPC":
+		return a2a.TransportProtocolJSONRPC
+	case "HTTPJSON":
+		return a2a.TransportProtocolHTTPJSON
+	default:
+		return a2a.TransportProtocol(value)
+	}
+}
+
+func normalizeCardBindings(card *a2a.AgentCard) {
+	if card == nil {
+		return
+	}
+	for _, endpoint := range card.SupportedInterfaces {
+		if endpoint != nil {
+			endpoint.ProtocolBinding = normalizeBinding(string(endpoint.ProtocolBinding))
+		}
+	}
 }
