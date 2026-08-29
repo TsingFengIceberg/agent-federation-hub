@@ -2,6 +2,9 @@ package a2afederation
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"testing"
 	"time"
@@ -68,7 +71,43 @@ func TestNewWithProfilesValidatesExplicitContract(t *testing.T) {
 	if _, err := NewWithProfiles(time.Second, []BindingProfile{{
 		ProtocolVersion: string(a2a.Version), Binding: a2a.TransportProtocolGRPC, StreamTransport: "SSE",
 	}}); err == nil {
-		t.Fatal("unsupported gRPC profile was accepted")
+		t.Fatal("invalid gRPC stream transport was accepted")
+	}
+	if _, err := NewWithProfiles(time.Second, []BindingProfile{GRPCBindingProfile}); err != nil {
+		t.Fatalf("valid gRPC profile rejected: %v", err)
+	}
+}
+
+func TestParseBindingProfiles(t *testing.T) {
+	profiles, err := ParseBindingProfiles("grpc, HTTP+JSON, json_rpc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 3 || profiles[0].Binding != a2a.TransportProtocolGRPC ||
+		profiles[1].Binding != a2a.TransportProtocolHTTPJSON || profiles[2].Binding != a2a.TransportProtocolJSONRPC {
+		t.Fatalf("profiles=%+v", profiles)
+	}
+	if _, err := ParseBindingProfiles("smtp"); err == nil {
+		t.Fatal("unsupported profile was accepted")
+	}
+}
+
+func TestAgentCardJWSRoundTripAndTamperDetection(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := &a2a.AgentCard{Name: "signed", Description: "fixture", Version: "1", Skills: []a2a.AgentSkill{}}
+	if err := SignAgentCard(card, key, "card-key-1"); err != nil {
+		t.Fatal(err)
+	}
+	verifier := CardVerifier{Required: true, Resolver: StaticCardSignatureResolver{"card-key-1": &key.PublicKey}}
+	if err := verifier.Verify(context.Background(), card); err != nil {
+		t.Fatal(err)
+	}
+	card.Name = "tampered"
+	if err := verifier.Verify(context.Background(), card); err == nil {
+		t.Fatal("tampered AgentCard was accepted")
 	}
 }
 

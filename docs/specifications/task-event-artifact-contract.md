@@ -64,9 +64,11 @@ transaction, enforces unique observation keys, and coordinates recoverable work
 across instances with expiring leases. Outbox delivery is at-least-once:
 publishers must deduplicate by `dedupKey` and tolerate a crash between publish
 and acknowledgement. PostgreSQL migrations are checksum-recorded and fail
-closed if an applied migration is changed. This is not yet a claim of
-operational HA, backup, compaction, dead-letter administration, or
-encryption-at-rest verification.
+closed if an applied migration is changed. The Outbox exposes tenant-scoped
+listing, authorized dead-letter replay, and bounded retention through the Hub
+HTTP API; CloudEvents 1.0 structured delivery is available as a replaceable
+HTTPS sink. This is not yet a claim of managed broker HA, backup encryption,
+cross-region replication, or consumer-offset durability.
 
 ## Artifact and Part
 
@@ -137,6 +139,11 @@ are not written to the Task, Event, Artifact, journal, database, or HTTP respons
 Push callbacks are durably and idempotently enqueued before HTTP success. A
 leased background processor applies the normalized observation and acknowledges
 the inbox item only after the Task/Event mutation commits.
+
+An operator may force one reconciliation through
+`POST /v1/tasks/{taskID}/reconcile`; adding `?subscribe=true` requests a
+streaming refresh when the registered Agent advertises streaming. The operation
+is tenant-scoped and uses the same recovery path as the background worker.
 
 ## Verified Scenarios
 

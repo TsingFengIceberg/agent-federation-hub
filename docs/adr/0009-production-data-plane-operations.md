@@ -26,8 +26,9 @@ boundaries:
   cross-region disaster recovery are not qualified by the local tests.
 - Object storage replication, encryption keys, legal holds, and restore drills
   remain deployment responsibilities until a concrete storage profile is chosen.
-- The Outbox dead-letter record is durable, but an operator API, retention
-  policy, replay authorization, and metrics/alert integration are still needed.
+- The Outbox supports tenant-scoped listing, authorized dead-letter replay, and
+  bounded retention through the Hub HTTP API. Prometheus counters remain
+  process-local and must be wired to durable metrics/alerts by deployment.
 - A single Hub process can drain gracefully; rolling upgrades and multi-node
   readiness require deployment-level health checks and failure injection.
 
@@ -37,3 +38,4 @@ boundaries:
 - [Artifact object data plane ADR](0006-artifact-object-data-plane.md)
 - [Outbox and profile ADR](0007-explicit-a2a-profile-and-durable-outbox.md)
 - [PostgreSQL backup/restore smoke](../../tests/postgres/run-backup-restore.sh)
+- [CloudEvents collector smoke](../../tests/hub/run-cloudevents-smoke.sh)

@@ -49,6 +49,10 @@ agents:
         push_notifications: false
       required_skills:
         - competitive-analysis
+      # Optional allow-list for capability negotiation. Leave empty to accept
+      # any additional skills advertised by this provider.
+      allowed_skills:
+        - competitive-analysis
 
     # Values are SecretProvider references, never literal credentials. The
     # map key must exactly match a security scheme declared by the Agent Card.

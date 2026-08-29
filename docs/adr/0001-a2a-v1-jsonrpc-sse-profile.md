@@ -20,8 +20,8 @@ durable internal task model.
 
 The first interoperability slice targets:
 
-- A2A interface version `1.0`, using the protocol source pinned at
-  [`16ba52690519bf55b9388e34d4db356efa88aa51`](../../submodules/a2a/);
+- A2A interface version `1.0`, using the normative v1.0.0 protocol source
+  pinned at [`173695755607e884aa9acf8ce4feed90e32727a1`](../../submodules/a2a/);
 - JSON-RPC over HTTP as the initial request/response Binding;
 - Server-Sent Events (SSE) as the streaming representation for JSON-RPC;
 - Agent discovery through `/.well-known/agent-card.json`;
@@ -99,10 +99,11 @@ a Go client acting as a provisional Hub test entry, a Go A2A Agent, and a Python
 A2A Agent. Both Agents expose the same black-box scenarios through the same A2A
 profile.
 
-The current TCK snapshot is pinned to an older specification revision and its Go
-SUT does not implement all current scenarios. TCK output is therefore supporting
-evidence, not the authority for this decision. Any skipped, waived, or revision-
-skewed assertion must be recorded rather than counted as a pass.
+The current TCK snapshot is pinned to the same normative v1.0.0 source, but its Go
+SUT does not implement all scenarios and the repository-owned profile still has
+explicit capability waivers. TCK output is therefore supporting evidence, not
+the authority for this decision. Any skipped or waived assertion must be
+recorded rather than counted as a pass.
 
 ## Consequences
 

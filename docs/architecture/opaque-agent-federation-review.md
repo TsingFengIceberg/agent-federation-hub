@@ -40,7 +40,12 @@ The product-specific notes and earlier synthesis are indexed in [`../research/ve
 
 ### A2A Protocol
 
-The pinned protocol source is [`a2aproject/A2A@16ba526`](../../submodules/a2a/). It defines A2A as interoperability between independent, potentially opaque systems and explicitly states that peers do not need access to one another's internal state, memory, or tools.
+The selected protocol baseline is [`a2aproject/A2A@1736957`](../../submodules/a2a/),
+the pinned A2A v1.0.0 source used by the current TCK profile. The newer
+`16ba526` mainline candidate is tracked separately. The baseline defines A2A as
+interoperability between independent, potentially opaque systems and explicitly
+states that peers do not need access to one another's internal state, memory, or
+tools.
 
 The public interoperability surface is intentionally narrower than an Agent implementation:
 

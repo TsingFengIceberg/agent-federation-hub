@@ -72,6 +72,9 @@ func (h *HTTPHandler) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/agents", h.protected(access.ActionAgentRegister, h.registerAgent))
 	mux.HandleFunc("GET /v1/agents", h.protected(access.ActionAgentList, h.listAgents))
 	mux.HandleFunc("POST /v1/agents/{agentID}/refresh", h.protected(access.ActionAgentRefresh, h.refreshAgent))
+	mux.HandleFunc("GET /v1/outbox", h.protected(access.ActionOutboxList, h.listOutbox))
+	mux.HandleFunc("POST /v1/outbox/{outboxID}/replay", h.protected(access.ActionOutboxReplay, h.replayOutbox))
+	mux.HandleFunc("POST /v1/outbox/purge", h.protected(access.ActionOutboxPurge, h.purgeOutbox))
 	mux.HandleFunc("POST /v1/tasks", h.protected(access.ActionTaskSubmit, h.submitTask))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/messages", h.protected(access.ActionTaskContinue, h.continueTask))
 	mux.HandleFunc("GET /v1/tasks/{taskID}", h.protected(access.ActionTaskRead, h.getTask))
@@ -172,6 +175,9 @@ func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) htt
 		if resourceID == "" {
 			resourceID = r.PathValue("agentID")
 		}
+		if resourceID == "" {
+			resourceID = r.PathValue("outboxID")
+		}
 		if h.Limiter != nil {
 			retryAfter, allowed := h.Limiter.Allow(r.Context(), principal, access.Request{Action: action, ResourceID: resourceID})
 			if !allowed {
@@ -256,6 +262,91 @@ func (h *HTTPHandler) refreshAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, agent)
+}
+
+func (h *HTTPHandler) listOutbox(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	store, ok := h.Service.Store.(core.OutboxAdminStore)
+	if !ok {
+		h.writeError(w, errors.New("configured Store does not expose Outbox administration"))
+		return
+	}
+	limit := 100
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 1000 {
+			writeProblem(w, http.StatusBadRequest, "validation", "INVALID_LIMIT", "outbox limit must be between 1 and 1000")
+			return
+		}
+		limit = parsed
+	}
+	status := core.OutboxStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status != "" && status != core.OutboxPending && status != core.OutboxAcked && status != core.OutboxDeadLettered && status != core.OutboxPurged {
+		writeProblem(w, http.StatusBadRequest, "validation", "INVALID_OUTBOX_STATUS", "unknown outbox status")
+		return
+	}
+	records, err := store.ListOutbox(r.Context(), tenantID, status, limit)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (h *HTTPHandler) replayOutbox(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	store, ok := h.Service.Store.(core.OutboxAdminStore)
+	if !ok {
+		h.writeError(w, errors.New("configured Store does not expose Outbox administration"))
+		return
+	}
+	if err := store.ReplayOutbox(r.Context(), tenantID, r.PathValue("outboxID"), time.Now().UTC()); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "requeued", "id": r.PathValue("outboxID")})
+}
+
+func (h *HTTPHandler) purgeOutbox(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	store, ok := h.Service.Store.(core.OutboxAdminStore)
+	if !ok {
+		h.writeError(w, errors.New("configured Store does not expose Outbox administration"))
+		return
+	}
+	beforeValue := strings.TrimSpace(r.URL.Query().Get("before"))
+	if beforeValue == "" {
+		writeProblem(w, http.StatusBadRequest, "validation", "PURGE_CUTOFF_REQUIRED", "before RFC3339 timestamp is required")
+		return
+	}
+	before, err := time.Parse(time.RFC3339, beforeValue)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "validation", "INVALID_PURGE_CUTOFF", "before must be an RFC3339 timestamp")
+		return
+	}
+	limit := 100
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		limit, err = strconv.Atoi(value)
+		if err != nil || limit < 1 || limit > 1000 {
+			writeProblem(w, http.StatusBadRequest, "validation", "INVALID_LIMIT", "outbox limit must be between 1 and 1000")
+			return
+		}
+	}
+	count, err := store.PurgeOutbox(r.Context(), tenantID, before, limit)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"purged": count})
 }
 
 func (h *HTTPHandler) submitTask(w http.ResponseWriter, r *http.Request) {
@@ -392,7 +483,8 @@ func (h *HTTPHandler) reconcileTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	task, err := h.Service.ReconcileTask(r.Context(), tenantID, r.PathValue("taskID"), false)
+	subscribe := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("subscribe")), "true")
+	task, err := h.Service.ReconcileTask(r.Context(), tenantID, r.PathValue("taskID"), subscribe)
 	if err != nil {
 		h.writeError(w, err)
 		return

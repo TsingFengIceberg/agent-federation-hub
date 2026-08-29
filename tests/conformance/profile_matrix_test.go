@@ -17,14 +17,18 @@ type profileMatrix struct {
 }
 
 type matrixEntry struct {
-	Name        string `json:"name"`
-	Binding     string `json:"binding"`
-	Stream      string `json:"streamTransport"`
-	SUTBinding  string `json:"sutBindingFlag"`
-	Status      string `json:"status"`
-	MustPassed  int    `json:"tckMustPassed"`
-	MustSkipped int    `json:"tckMustSkipped"`
-	MustFailed  int    `json:"tckMustFailed"`
+	Name             string `json:"name"`
+	Binding          string `json:"binding"`
+	Stream           string `json:"streamTransport"`
+	SUTBinding       string `json:"sutBindingFlag"`
+	Status           string `json:"status"`
+	MustPassed       int    `json:"tckMustPassed"`
+	MustSkipped      int    `json:"tckMustSkipped"`
+	MustNotTested    int    `json:"tckMustNotTested"`
+	MustFailed       int    `json:"tckMustFailed"`
+	TransportPassed  int    `json:"tckTransportPassed"`
+	TransportSkipped int    `json:"tckTransportSkipped"`
+	TransportFailed  int    `json:"tckTransportFailed"`
 }
 
 func TestProfileMatrixPinsAndClaims(t *testing.T) {
@@ -63,8 +67,16 @@ func TestProfileMatrixPinsAndClaims(t *testing.T) {
 		if profile.MustFailed != 0 {
 			t.Fatalf("profile %q records failed MUST requirements: %d", profile.Name, profile.MustFailed)
 		}
-		if profile.Binding == "GRPC" && profile.Status != "not-implemented" {
-			t.Fatalf("gRPC profile must remain explicitly not implemented")
+		if profile.MustPassed < 0 || profile.MustSkipped < 0 || profile.MustNotTested < 0 ||
+			profile.MustPassed+profile.MustSkipped+profile.MustNotTested+profile.MustFailed != 114 {
+			t.Fatalf("profile %q has incomplete MUST requirement counts: %+v", profile.Name, profile)
+		}
+		if profile.TransportPassed < 0 || profile.TransportSkipped < 0 || profile.TransportFailed < 0 ||
+			profile.TransportPassed+profile.TransportSkipped+profile.TransportFailed == 0 {
+			t.Fatalf("profile %q has incomplete transport test counts: %+v", profile.Name, profile)
+		}
+		if profile.Binding == "GRPC" && profile.Status == "not-implemented" && profile.MustPassed != 0 {
+			t.Fatalf("unimplemented gRPC profile cannot record passed requirements")
 		}
 		if profile.Binding == "HTTP+JSON" && profile.Status == "accepted" {
 			t.Fatalf("HTTP+JSON cannot be accepted without the current product gate")

@@ -151,10 +151,15 @@ func (p ProtocolPolicy) Validate(field string, required bool) error {
 			return fmt.Errorf("%s.profiles[%d].protocol_version is required", field, i)
 		}
 		binding := strings.ToUpper(strings.TrimSpace(profile.Binding))
-		if binding != "JSONRPC" && binding != "HTTP_JSON" {
-			return fmt.Errorf("%s.profiles[%d].binding must be JSONRPC or HTTP_JSON", field, i)
+		if binding != "JSONRPC" && binding != "HTTP_JSON" && binding != "GRPC" {
+			return fmt.Errorf("%s.profiles[%d].binding must be JSONRPC, HTTP_JSON, or GRPC", field, i)
 		}
-		if profile.StreamTransport != "" && strings.ToUpper(profile.StreamTransport) != "SSE" {
+		stream := strings.ToUpper(strings.TrimSpace(profile.StreamTransport))
+		if binding == "GRPC" {
+			if stream != "SERVER_STREAMING" && stream != "GRPC" {
+				return fmt.Errorf("%s.profiles[%d].stream_transport must be SERVER_STREAMING for GRPC", field, i)
+			}
+		} else if stream != "" && stream != "SSE" {
 			return fmt.Errorf("%s.profiles[%d].stream_transport must be SSE", field, i)
 		}
 	}
@@ -352,6 +357,7 @@ func (r Registration) RegistrationPolicy(defaults Defaults) hub.AgentRegistratio
 	policy.RequireStreaming = discovery.RequiredCapabilities["streaming"]
 	policy.RequirePushNotifications = discovery.RequiredCapabilities["push_notifications"]
 	policy.RequiredSkills = append([]string(nil), discovery.RequiredSkills...)
+	policy.AllowedSkills = append([]string(nil), discovery.AllowedSkills...)
 	return policy
 }
 

@@ -64,8 +64,8 @@ func TestSelectedA2AProfilePinsStayExplicit(t *testing.T) {
 	if selected.RepositoryContractStatus != "verified-local" {
 		t.Fatal("repository contract status must be explicit")
 	}
-	if selected.ExternalTCKStatus != "unresolved-revision-skew" {
-		t.Fatal("external TCK must not be represented as passing while revision skew remains")
+	if selected.ExternalTCKStatus != "aligned-v1.0.0" {
+		t.Fatalf("unexpected external TCK status: %s", selected.ExternalTCKStatus)
 	}
 	if selected.OwnedSUT != "cmd/a2a-tck-sut" || selected.OwnedSUTProfile != "JSONRPC+SSE" || selected.OwnedSUTStatus != "implemented" {
 		t.Fatalf("owned SUT metadata is incomplete: %+v", selected)
@@ -85,9 +85,12 @@ func TestSelectedA2AProfilePinsStayExplicit(t *testing.T) {
 		t.Fatalf("waiver metadata does not match profile: %+v", waivers)
 	}
 	if len(waivers.Waivers) == 0 {
-		t.Fatal("at least one explicit TCK waiver is required while alignment is unresolved")
+		t.Fatal("at least one explicit TCK waiver is required for unimplemented requirements")
 	}
 	for _, waiver := range waivers.Waivers {
+		if waiver.ID == "REVISION-SKEW" {
+			t.Fatal("revision-skew waiver must be removed after normative v1.0.0 alignment")
+		}
 		if waiver.ID == "" || waiver.Scope == "" || waiver.Reason == "" || waiver.Evidence == "" {
 			t.Fatalf("incomplete TCK waiver: %+v", waiver)
 		}

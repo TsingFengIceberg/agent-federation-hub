@@ -15,18 +15,28 @@ import (
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/interop"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	a2apush "github.com/a2aproject/a2a-go/v2/a2asrv/push"
 )
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:4101", "HTTP listen address")
 	publicURL := flag.String("public-url", "http://127.0.0.1:4101", "base URL advertised by the Agent Card")
+	pushNotifications := flag.Bool("push", false, "enable the A2A HTTP Push sender and advertise Push support")
 	flag.Parse()
 
 	card := fixtureCard(*publicURL)
-	handler := a2asrv.NewHandler(
-		interop.ScenarioExecutor{},
-		a2asrv.WithCapabilityChecks(&card.Capabilities),
-	)
+	options := []a2asrv.RequestHandlerOption{a2asrv.WithCapabilityChecks(&card.Capabilities)}
+	if *pushNotifications {
+		card.Capabilities.PushNotifications = true
+		options = append(options, a2asrv.WithPushNotifications(
+			a2apush.NewInMemoryStore(),
+			a2apush.NewHTTPPushSender(&a2apush.HTTPSenderConfig{
+				AllowPrivateNetworks: true,
+				FailOnError:          true,
+			}),
+		))
+	}
+	handler := a2asrv.NewHandler(interop.ScenarioExecutor{}, options...)
 
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))

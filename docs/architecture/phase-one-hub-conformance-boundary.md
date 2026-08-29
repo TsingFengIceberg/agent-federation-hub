@@ -13,6 +13,9 @@ around a provider-opaque federation service:
 POST /v1/agents
 GET  /v1/agents
 POST /v1/agents/{id}/refresh
+GET  /v1/outbox
+POST /v1/outbox/{id}/replay
+POST /v1/outbox/purge
 POST /v1/tasks
 GET  /v1/tasks/{id}
 GET  /v1/tasks/{id}/events
@@ -53,16 +56,16 @@ unhealthy until a later refresh succeeds.
 
 | Area | Current executable evidence | Not yet claimed |
 |---|---|---|
-| A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, SDK `v2.5.0`, explicit opt-in HTTP+JSON adapter path, repository-owned deterministic TCK SUT | HTTP+JSON accepted-profile evidence, gRPC, extensions, signed/extended Card policy |
-| Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event/outbox transactions, revisions, schema checksum ledger, and real two-pool lease tests | Managed database qualification, HA, backup/restore, compaction/retention, outbox dead-letter operations |
+| A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, opt-in HTTP+JSON and gRPC adapter paths, gRPC Bearer metadata regression, signed-card round-trip, SDK `v2.5.0`, repository-owned three-Binding TCK SUT, and provider-SDK Push sender/Hub receiver smoke | extensions, signed/extended Card policy, production authentication and complete TCK Push coverage |
+| Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event/outbox transactions, revisions, schema checksum ledger, two-pool lease tests, Outbox admin replay/retention | Managed database qualification, HA, encrypted backup/PITR, and cross-region replication |
 | Recovery | Known-ID disconnect uses `GetTask`; unknown-ID send becomes ambiguous | Automated ambiguous-operation resolution or exactly-once execution |
-| Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, and audit | Real partner trust-service integration, automated rollover, consent, centralized retention, and outage qualification |
+| Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, local and central audit retry/outage tests | Production partner IdP/CA/PDP rollout, automated key management, consent, and operational SLO qualification |
 | Tenancy | Authenticated Principal supplies tenant for every management lookup; forged JWT-mode tenant header is ignored | ABAC policy administration, quotas, tenant encryption keys, cross-organization trust federation |
-| Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack, HTTPS/DNS/IP policy, authenticated rate limiting and audit | Replay timestamp/signature, dead-letter policy, HA ingress load test |
+| Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack, HTTPS/DNS/IP policy, authenticated rate limiting and audit; real Go SDK Push sender smoke covers status and Artifact delivery | Replay timestamp/signature, dead-letter policy, HA ingress load test, and production sender qualification |
 | Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics; filesystem/S3 object storage, MIME/size/quota controls, ClamAV quarantine, authenticated retrieval, expiry leases | Encryption policy, DLP/legal hold, backup/restore, production throughput |
 | Errors | Sanitized transport/auth/authz/validation/resource/state/protocol categories | Complete binding-specific status equivalence and tenant policy details |
 | Registry | Durable built-in Agent Card registration by URL, skill selection, explicit Card refresh and health status | Nacos/ARD adapter, Card signature verification, scheduled refresh policy and external registry health |
-| Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance; durable Outbox worker | Priority, preemption, operator pause/drain, production event-bus operations and dead-letter administration |
+| Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance; durable Outbox worker with CloudEvents sink and admin replay/retention | Priority, preemption, operator pause/drain, broker partitioning and managed event-bus operations |
 | Gateway | Direct A2A calls behind the federation Adapter interface | Managed agentgateway route, policy routing, rate limiting, egress controls |
 | AAMP | AAMP 1.1 lifecycle/result/attachment mapper into the common model | SMTP/JMAP client, discovery, sender policy, pairing, mailbox credentials |
 
@@ -73,7 +76,10 @@ URLs. The operator-configured Push callback has the same public HTTPS checks.
 Production deployment still needs DNS resolution and revalidation on every
 connection and redirect to close DNS-rebinding and hostname-based SSRF paths.
 The Hub is the Push receiver in this slice; the remote Agent performs outbound
-delivery.
+delivery. [`tests/hub/run-push-smoke.sh`](../../tests/hub/run-push-smoke.sh)
+uses the pinned Go SDK's `HTTPPushSender` against the Hub's authenticated
+callback. It is local executable evidence, not a production webhook or HA
+ingress qualification.
 
 ## Running the Initial Service
 
@@ -102,13 +108,16 @@ records the selected protocol source, SDK, Binding, and the exact TCK revision
 previously evaluated. A deterministic Go test verifies that these pins and their
 evidence status do not drift silently.
 
-The external TCK remains `unresolved-revision-skew`, not passed. At the pinned
-checkout, the repository-owned SUT exited successfully for JSON-RPC (`81
-passed, 154 skipped, 30 deselected`) and HTTP+JSON (`73 passed, 162 skipped,
-30 deselected`). The compatibility registry still records skipped gRPC,
-authentication, Push, and revision-skew requirements; full conformance
-requires an aligned TCK and closure or explanation of every remaining MUST
-failure.
+The TCK is now aligned to the selected normative A2A `v1.0.0` source commit
+`173695755607e884aa9acf8ce4feed90e32727a1` and is checked by
+`tests/conformance/check-pins.sh`. At that pinned checkout, the repository-owned
+SUT exits successfully for JSON-RPC (`81 passed, 154 skipped, 30 deselected`),
+HTTP+JSON (`73 passed, 162 skipped, 30 deselected`), and gRPC (`62 passed, 173
+skipped, 30 deselected`). This is still not a complete multi-binding claim:
+authentication, Push sender, signed-card, and other requirements remain
+explicit waivers. The
+newer A2A mainline commit remains recorded as `latestProtocolCandidateCommit`
+for a separately gated upgrade.
 
 ## Registry and Gateway Replaceability
 
@@ -130,17 +139,19 @@ orchestration runtime, and no SMTP/JMAP compatibility claim is made yet.
 
 ## Event Publication and Trust Evidence
 
-The durable Outbox can publish to a configured HTTPS collector or to a local
-0600 JSONL sink through `--outbox-file`; both use stable tenant/deduplication
-keys and at-least-once retry semantics. The local sink is an operator-visible
-development integration, not a claim that a production event bus has been
-qualified.
+The durable Outbox can publish to a configured HTTPS collector, a CloudEvents
+1.0 structured-mode collector, or a local 0600 JSONL sink. All use stable
+tenant/deduplication keys and at-least-once retry semantics. `GET /v1/outbox`,
+the replay route, and the bounded purge route provide tenant-scoped operations;
+the CloudEvents smoke verifies a real HTTPS collector. Broker partitioning,
+consumer offsets, and managed event-bus SLOs remain deployment qualification.
 
 The opt-in trust integration test exercises OIDC discovery and JWKS rotation,
-JWT revocation, HTTPS policy decisions, rate limiting, durable audit, and
-SPIFFE-mapped mTLS using generated local certificates. It is evidence for the
-interfaces and failure behavior only; partner IdP/CA/PDP deployment, rotation
-operations, and outage drills remain external qualification work.
+JWT revocation, HTTPS policy decisions, rate limiting, durable local and
+central audit, bounded exporter retries/outage recovery, and SPIFFE-mapped mTLS
+using generated local certificates. It is repeatable partner-style evidence;
+production IdP/CA/PDP deployment and key-management operations remain external
+qualification work.
 
 ## External Provider Readiness Note
 

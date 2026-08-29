@@ -376,6 +376,48 @@ func TestDuplicatePushAndTenantIsolation(t *testing.T) {
 	}
 }
 
+func TestFirstPushCanEstablishRemoteCorrelationBeforeImmediateResponse(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	adapter := &fakeAdapter{
+		descriptor: federation.Descriptor{
+			Name: "agent", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0", PushNotifications: true,
+		},
+		send: func(context.Context, core.Agent, federation.Message) iter.Seq2[federation.Observation, error] {
+			// Simulate a provider that accepts the request but sends its first
+			// Push event before the immediate SendMessage response is observed.
+			return emptySequence()
+		},
+	}
+	service := newTestService(t, store, adapter)
+	service.PublicBaseURL = "https://hub.example"
+	registerTestAgent(t, service, "tenant-a")
+	task, err := service.SubmitTask(context.Background(), "tenant-a", SubmitTaskInput{
+		AgentID: "agent-1", Text: "work", EnablePush: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.RemoteTaskID != "" {
+		t.Fatalf("test precondition remote task ID=%q", task.RemoteTaskID)
+	}
+	if _, err := service.AcceptPush(context.Background(), "tenant-a", task.ID, "push-secret", federation.Observation{
+		DedupKey: "first-push", RemoteTaskID: "remote-first", RemoteContextID: "context-first",
+		State: core.TaskStateWorking,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated := processOneInboxItem(t, store, service)
+	if updated.RemoteTaskID != "remote-first" || updated.RemoteContextID != "context-first" || updated.State != core.TaskStateWorking {
+		t.Fatalf("first Push did not establish correlation: %+v", updated)
+	}
+	if _, err := service.AcceptPush(context.Background(), "tenant-a", task.ID, "push-secret", federation.Observation{
+		DedupKey: "different-remote", RemoteTaskID: "remote-other", State: core.TaskStateCompleted,
+	}); !errors.Is(err, ErrPushTaskMismatch) {
+		t.Fatalf("remote task ID change returned %v", err)
+	}
+}
+
 func processOneInboxItem(t *testing.T, store *core.JournalStore, service *Service) core.Task {
 	t.Helper()
 	leases, err := store.ClaimInbox(context.Background(), "test-inbox-worker", 1, time.Now().UTC(), time.Minute)

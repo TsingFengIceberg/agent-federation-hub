@@ -5,6 +5,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 go_bin=${GO_BIN:-go}
 tck_dir=${A2A_TCK_DIR:-}
 port=${A2A_TCK_PORT:-4999}
+grpc_port=${A2A_TCK_GRPC_PORT:-5000}
 report_dir=${A2A_TCK_REPORT_DIR:-"$repo_root/var/tck"}
 transport=${A2A_TCK_TRANSPORT:-jsonrpc}
 binding=${A2A_TCK_BINDING:-$transport}
@@ -28,7 +29,7 @@ trap cleanup EXIT
 
 cd "$repo_root"
 "$go_bin" build -o "$sut_bin" ./cmd/a2a-tck-sut
-"$sut_bin" --listen "127.0.0.1:$port" --public-url "http://127.0.0.1:$port" --binding "$binding" >"$run_dir/sut.log" 2>&1 &
+"$sut_bin" --listen "127.0.0.1:$port" --public-url "http://127.0.0.1:$port" --grpc-listen "127.0.0.1:$grpc_port" --binding "$binding" >"$run_dir/sut.log" 2>&1 &
 sut_pid=$!
 
 for _ in $(seq 1 80); do
@@ -64,12 +65,16 @@ with open(compatibility_path, encoding="utf-8") as handle:
     compatibility = json.load(handle)
 per_requirement = compatibility.get("per_requirement", {})
 status_counts = {}
+must_status_counts = {}
 for entry in per_requirement.values():
     status = entry.get("status", "UNKNOWN")
     status_counts[status] = status_counts.get(status, 0) + 1
+    if entry.get("level") == "MUST":
+        must_status_counts[status] = must_status_counts.get(status, 0) + 1
+transport_result = compatibility.get("per_transport", {}).get(transport, {})
 result = {
     "tckCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
-    "selectedProtocolCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
+    "selectedProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
     "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
     "sut": "cmd/a2a-tck-sut",
     "transport": transport,
@@ -79,6 +84,13 @@ result = {
     "interpretedAs": "evidence-with-waivers-and-skips",
     "compatibilitySummary": compatibility.get("summary", {}),
     "requirementStatusCounts": status_counts,
+    "mustRequirementStatusCounts": must_status_counts,
+    "transportStatusCounts": {
+        "PASS": int(transport_result.get("passed", 0)),
+        "SKIPPED": int(transport_result.get("skipped", 0)),
+        "FAIL": int(transport_result.get("failed", 0)),
+        "TOTAL": int(transport_result.get("total", 0)),
+    },
 }
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump(result, handle, indent=2)
@@ -88,14 +100,16 @@ else
   cat >"$report_file" <<EOF
 {
   "tckCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
-  "selectedProtocolCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
+  "selectedProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
   "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
   "sut": "cmd/a2a-tck-sut",
   "transport": "$transport",
   "requestedLevel": "must",
   "exitCode": $tck_status,
   "waiverFile": "tests/conformance/tck-waivers.json",
-  "interpretedAs": "evidence-with-waivers-and-skips"
+  "interpretedAs": "evidence-with-waivers-and-skips",
+  "mustRequirementStatusCounts": {},
+  "transportStatusCounts": {}
 }
 EOF
 fi

@@ -7,10 +7,11 @@ go_bin=${GO_BIN:-go}
 report_root=${A2A_TCK_REPORT_ROOT:-"$repo_root/var/tck"}
 
 "$repo_root/tests/conformance/check-pins.sh"
-for profile in jsonrpc http_json; do
+for profile in jsonrpc http_json grpc; do
   case "$profile" in
     jsonrpc) transport=jsonrpc ;;
     http_json) transport=http_json ;;
+    grpc) transport=grpc ;;
   esac
   A2A_TCK_TRANSPORT="$transport" \
   A2A_TCK_BINDING="$profile" \

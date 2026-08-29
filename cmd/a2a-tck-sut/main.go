@@ -24,8 +24,15 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v1"
+	v1 "github.com/a2aproject/a2a-go/v2/a2apb/v1"
+	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const protocolVersion = "1.0"
@@ -42,7 +49,10 @@ func (versionInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContex
 	if !ok || len(values) == 0 || strings.TrimSpace(values[0]) == "" || values[0] == protocolVersion {
 		return ctx, nil, nil
 	}
-	return ctx, nil, fmt.Errorf("%w: supported version is %s", a2a.ErrVersionNotSupported, protocolVersion)
+	// The A2A gRPC binding maps an unsupported service version to
+	// UNIMPLEMENTED. Return an explicit status so the SDK's generic
+	// FailedPrecondition mapping cannot hide the wire-level contract.
+	return ctx, nil, status.Error(codes.Unimplemented, "this version is not supported: supported version is "+protocolVersion)
 }
 
 func (versionInterceptor) After(ctx context.Context, callCtx *a2asrv.CallContext, response *a2asrv.Response) error {
@@ -140,6 +150,106 @@ func cloneTask(task *a2a.Task) *a2a.Task {
 }
 
 type tckExecutor struct{ state *sutTaskState }
+
+// grpcTCKHandler keeps the SDK's conversion layer while making unsupported
+// Push operations and task subscriptions explicit for the fixture.
+type grpcTCKHandler struct {
+	*a2agrpc.Handler
+	requestHandler a2asrv.RequestHandler
+	state          *sutTaskState
+}
+
+func (h *grpcTCKHandler) SubscribeToTask(req *v1.SubscribeToTaskRequest, stream grpc.ServerStreamingServer[v1.StreamResponse]) error {
+	converted, err := pbconv.FromProtoSubscribeToTaskRequest(req)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	// The SDK's default event queue closes as soon as the deterministic
+	// executor returns INPUT_REQUIRED. Keep the fixture's observable task alive
+	// and poll its state so multiple gRPC subscribers receive the same ordered
+	// snapshots and can observe a later continuation.
+	if h.state != nil {
+		task, ok := h.state.snapshot(converted.ID)
+		if !ok {
+			return status.Error(codes.NotFound, "task not found")
+		}
+		if task.Status.State.Terminal() {
+			return status.Error(codes.FailedPrecondition, "subscription is not supported for terminal tasks")
+		}
+		if err := sendGRPCTask(stream, task); err != nil {
+			return err
+		}
+		last := task.Status.State
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stream.Context().Done():
+				return nil
+			case <-ticker.C:
+				updated, exists := h.state.snapshot(converted.ID)
+				if !exists {
+					return status.Error(codes.NotFound, "task not found")
+				}
+				if updated.Status.State != last {
+					if err := sendGRPCTask(stream, updated); err != nil {
+						return err
+					}
+					last = updated.Status.State
+					if updated.Status.State.Terminal() {
+						return nil
+					}
+				}
+			}
+		}
+	}
+	for event, eventErr := range h.requestHandler.SubscribeToTask(stream.Context(), converted) {
+		if eventErr != nil {
+			if errors.Is(eventErr, a2a.ErrTaskNotFound) {
+				return status.Error(codes.NotFound, "task not found")
+			}
+			if errors.Is(eventErr, a2a.ErrUnsupportedOperation) {
+				return status.Error(codes.FailedPrecondition, "subscription is not supported")
+			}
+			return status.Error(codes.Internal, eventErr.Error())
+		}
+		response, convertErr := pbconv.ToProtoStreamResponse(event)
+		if convertErr != nil {
+			return status.Error(codes.Internal, convertErr.Error())
+		}
+		if sendErr := stream.Send(response); sendErr != nil {
+			return status.Error(codes.Aborted, sendErr.Error())
+		}
+	}
+	return nil
+}
+
+func sendGRPCTask(stream grpc.ServerStreamingServer[v1.StreamResponse], task *a2a.Task) error {
+	response, err := pbconv.ToProtoStreamResponse(task)
+	if err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	if err := stream.Send(response); err != nil {
+		return status.Error(codes.Aborted, err.Error())
+	}
+	return nil
+}
+
+func (h *grpcTCKHandler) CreateTaskPushNotificationConfig(context.Context, *v1.TaskPushNotificationConfig) (*v1.TaskPushNotificationConfig, error) {
+	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
+}
+
+func (h *grpcTCKHandler) GetTaskPushNotificationConfig(context.Context, *v1.GetTaskPushNotificationConfigRequest) (*v1.TaskPushNotificationConfig, error) {
+	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
+}
+
+func (h *grpcTCKHandler) ListTaskPushNotificationConfigs(context.Context, *v1.ListTaskPushNotificationConfigsRequest) (*v1.ListTaskPushNotificationConfigsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
+}
+
+func (h *grpcTCKHandler) DeleteTaskPushNotificationConfig(context.Context, *v1.DeleteTaskPushNotificationConfigRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
+}
 
 // nonNilTaskStore keeps the REST representation conformant for an empty task
 // list. The upstream in-memory store returns a nil slice, which JSON encodes
@@ -274,7 +384,9 @@ func statusEvent(execCtx *a2asrv.ExecutorContext, state a2a.TaskState) *a2a.Task
 func main() {
 	listen := flag.String("listen", "127.0.0.1:9999", "HTTP listen address")
 	publicURL := flag.String("public-url", "", "public base URL used in the Agent Card")
-	binding := flag.String("binding", "jsonrpc", "A2A binding advertised by the SUT: jsonrpc or http_json")
+	grpcListen := flag.String("grpc-listen", "127.0.0.1:10000", "gRPC listen address when the grpc binding is selected")
+	grpcURL := flag.String("grpc-url", "", "gRPC target advertised in the Agent Card; defaults to --grpc-listen")
+	binding := flag.String("binding", "jsonrpc", "A2A binding advertised by the SUT: jsonrpc, http_json, or grpc")
 	flag.Parse()
 	if *publicURL == "" {
 		*publicURL = "http://" + *listen
@@ -285,13 +397,22 @@ func main() {
 		protocolBinding = a2a.TransportProtocolJSONRPC
 	case "http_json", "http+json":
 		protocolBinding = a2a.TransportProtocolHTTPJSON
+	case "grpc":
+		protocolBinding = a2a.TransportProtocolGRPC
 	default:
 		log.Fatalf("unsupported A2A binding %q", *binding)
+	}
+	if *grpcURL == "" {
+		*grpcURL = *grpcListen
+	}
+	interfaceURL := *publicURL
+	if protocolBinding == a2a.TransportProtocolGRPC {
+		interfaceURL = *grpcURL
 	}
 	card := &a2a.AgentCard{
 		Name: "Agent Federation Hub Repository TCK SUT", Version: "1.0.0",
 		Description:         "Repository-owned deterministic A2A v1 compatibility fixture",
-		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(*publicURL, protocolBinding)},
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(interfaceURL, protocolBinding)},
 		Capabilities:        a2a.AgentCapabilities{Streaming: true},
 		DefaultInputModes:   []string{"text"}, DefaultOutputModes: []string{"text", "application/json", "text/plain"},
 		Skills: []a2a.AgentSkill{{ID: "tck", Name: "A2A TCK fixture", Description: "Deterministic protocol scenarios", Tags: []string{"tck"}}},
@@ -310,6 +431,10 @@ func main() {
 		protocolHandler = guardedJSONRPCHandler(state, a2asrv.NewJSONRPCHandler(handler))
 	case a2a.TransportProtocolHTTPJSON:
 		protocolHandler = guardedRESTHandler(state, a2asrv.NewRESTHandler(handler))
+	case a2a.TransportProtocolGRPC:
+		// The HTTP listener serves the discovery Card while the actual A2A
+		// methods are exposed by the separate gRPC listener below.
+		protocolHandler = http.NotFoundHandler()
 	}
 	mux.Handle("/", protocolHandler)
 	server := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute}
@@ -318,7 +443,20 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("A2A TCK SUT listening on %s", *listen)
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	errs := make(chan error, 2)
+	go func() { errs <- server.Serve(listener) }()
+	if protocolBinding == a2a.TransportProtocolGRPC {
+		grpcListener, listenErr := net.Listen("tcp4", *grpcListen)
+		if listenErr != nil {
+			log.Fatal(listenErr)
+		}
+		grpcServer := grpc.NewServer()
+		grpcTCKHandler := &grpcTCKHandler{Handler: a2agrpc.NewHandler(handler), requestHandler: handler, state: state}
+		v1.RegisterA2AServiceServer(grpcServer, grpcTCKHandler)
+		log.Printf("A2A TCK SUT gRPC listening on %s", *grpcListen)
+		go func() { errs <- grpcServer.Serve(grpcListener) }()
+	}
+	if err := <-errs; err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, grpc.ErrServerStopped) {
 		log.Fatal(err)
 	}
 }

@@ -179,6 +179,42 @@ func TestHTTPAgentSkillFilterAndRefresh(t *testing.T) {
 	}
 }
 
+func TestHTTPOutboxAdministrationIsTenantScoped(t *testing.T) {
+	store, err := core.OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service := newTestService(t, store, &fakeAdapter{})
+	handler := testHTTPHandler(service, nil, 0)
+	if _, err := store.CreateTask(context.Background(), core.Task{ID: "admin-task", TenantID: "tenant-a", AgentID: "agent-1", State: core.TaskStateSubmitted, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}, core.Event{Type: "task.submitted", State: core.TaskStateSubmitted, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := store.ClaimOutbox(context.Background(), "admin-publisher", 1, time.Now().UTC(), time.Minute)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("leases=%+v err=%v", leases, err)
+	}
+	if err := store.DeadLetterOutbox(context.Background(), leases[0], "test failure"); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, handler, http.MethodGet, "/v1/outbox?status=DEAD_LETTERED", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"DEAD_LETTERED"`) {
+		t.Fatalf("list status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/v1/outbox?status=DEAD_LETTERED", "", "tenant-b", nil)
+	if response.Code != http.StatusOK || response.Body.String() != "[]\n" {
+		t.Fatalf("cross-tenant list status=%d body=%s", response.Code, response.Body.String())
+	}
+	var records []core.OutboxRecord
+	if err := json.Unmarshal([]byte(request(t, handler, http.MethodGet, "/v1/outbox?status=DEAD_LETTERED", "", "tenant-a", nil).Body.String()), &records); err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	response = request(t, handler, http.MethodPost, "/v1/outbox/"+records[0].Item.ID+"/replay", "", "tenant-a", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("replay status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestHTTPPushSecurityAndSizeLimit(t *testing.T) {
 	store, _ := core.OpenJournal("")
 	defer store.Close()

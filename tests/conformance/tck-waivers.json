@@ -1,14 +1,8 @@
 {
-  "status": "unresolved-revision-skew",
+  "status": "aligned-v1.0.0",
   "tckCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
   "tckProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
   "waivers": [
-    {
-      "id": "REVISION-SKEW",
-      "scope": "all",
-      "reason": "The pinned TCK embeds an older A2A specification snapshot than the repository-selected protocol source; binding error mappings differ.",
-      "evidence": "docs/architecture/a2a-v1-go-python-decision-gate.md"
-    },
     {
       "id": "SUT-AUTH",
       "scope": "authentication",
@@ -18,13 +12,13 @@
     {
       "id": "SUT-PUSH",
       "scope": "push-notifications",
-      "reason": "Push receiver and durable inbox behavior are tested on the Hub boundary; this protocol fixture does not advertise a remote Push sender.",
-      "evidence": "docs/specifications/task-event-artifact-contract.md"
+      "reason": "The TCK fixture does not advertise a remote Push sender; the pinned Go SDK sender and Hub receiver are covered separately by the repository-owned Push smoke.",
+      "evidence": "tests/hub/run-push-smoke.sh"
     },
     {
-      "id": "PROFILE-UNTESTED-BINDINGS",
-      "scope": "grpc,http_json,card-signing,auth",
-      "reason": "The owned SUT advertises and runs only the selected JSON-RPC+SSE profile; other bindings and security capabilities remain outside this executable profile.",
+      "id": "PROFILE-UNTESTED-CAPABILITIES",
+      "scope": "card-signing,auth,push-tck",
+      "reason": "The owned SUT now runs JSON-RPC+SSE, HTTP+JSON+SSE, and gRPC server-streaming profiles; signed-card trust distribution, production authentication, and Push scenarios in the TCK fixture remain outside this executable profile.",
       "evidence": "docs/architecture/a2a-v1-go-python-decision-gate.md"
     }
   ]

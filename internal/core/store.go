@@ -64,6 +64,16 @@ type OutboxStore interface {
 	DeadLetterOutbox(context.Context, OutboxLease, string) error
 }
 
+// OutboxAdminStore exposes bounded, tenant-scoped operator operations. It is
+// deliberately separate from OutboxStore so publishers do not gain replay or
+// retention authority accidentally.
+type OutboxAdminStore interface {
+	OutboxStore
+	ListOutbox(context.Context, string, OutboxStatus, int) ([]OutboxRecord, error)
+	ReplayOutbox(context.Context, string, string, time.Time) error
+	PurgeOutbox(context.Context, string, time.Time, int) (int, error)
+}
+
 type RevocationStore interface {
 	RevokeToken(context.Context, TokenRevocation) error
 	TokenRevoked(context.Context, string, string, string, time.Time) (bool, error)
@@ -118,7 +128,11 @@ type outboxState struct {
 	Attempt      uint32    `json:"attempt"`
 	Acked        bool      `json:"acked"`
 	DeadLettered bool      `json:"deadLettered"`
+	Purged       bool      `json:"purged"`
 	LastError    string    `json:"lastError,omitempty"`
+	AckedAt      time.Time `json:"ackedAt,omitempty"`
+	DeadLetterAt time.Time `json:"deadLetteredAt,omitempty"`
+	PurgedAt     time.Time `json:"purgedAt,omitempty"`
 }
 
 type artifactLeaseState struct {
@@ -949,7 +963,7 @@ func (s *JournalStore) ClaimOutbox(
 	ids := make([]string, 0, len(s.outbox))
 	for id := range s.outbox {
 		state := s.outboxStates[id]
-		if state.Acked || state.DeadLettered || state.AvailableAt.After(now) || (state.Owner != "" && state.ExpiresAt.After(now)) {
+		if state.Acked || state.DeadLettered || state.Purged || state.AvailableAt.After(now) || (state.Owner != "" && state.ExpiresAt.After(now)) {
 			continue
 		}
 		ids = append(ids, id)
@@ -1009,6 +1023,7 @@ func (s *JournalStore) AckOutbox(_ context.Context, lease OutboxLease) error {
 	state.Owner = ""
 	state.ExpiresAt = time.Time{}
 	state.Acked = true
+	state.AckedAt = time.Now().UTC()
 	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: lease.Item.ID, OutboxState: &state}
 	if err := s.append(record); err != nil {
 		return err
@@ -1046,12 +1061,125 @@ func (s *JournalStore) DeadLetterOutbox(_ context.Context, lease OutboxLease, re
 	state.ExpiresAt = time.Time{}
 	state.DeadLettered = true
 	state.LastError = reason
+	state.DeadLetterAt = time.Now().UTC()
 	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: lease.Item.ID, OutboxState: &state}
 	if err := s.append(record); err != nil {
 		return err
 	}
 	s.applyRecord(record)
 	return nil
+}
+
+func (s *JournalStore) ListOutbox(_ context.Context, tenantID string, status OutboxStatus, limit int) ([]OutboxRecord, error) {
+	if tenantID == "" || limit <= 0 {
+		return nil, errors.New("tenant and positive outbox limit are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.outbox))
+	for id, item := range s.outbox {
+		if item.TenantID == tenantID {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return s.outbox[ids[i]].CreatedAt.Before(s.outbox[ids[j]].CreatedAt) ||
+			(s.outbox[ids[i]].CreatedAt.Equal(s.outbox[ids[j]].CreatedAt) && ids[i] < ids[j])
+	})
+	result := make([]OutboxRecord, 0, min(limit, len(ids)))
+	for _, id := range ids {
+		record := s.outboxRecordLocked(id)
+		if status != "" && record.Status != status {
+			continue
+		}
+		result = append(result, record)
+		if len(result) == limit {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (s *JournalStore) outboxRecordLocked(id string) OutboxRecord {
+	item := s.outbox[id]
+	state := s.outboxStates[id]
+	status := OutboxPending
+	if state.Purged {
+		status = OutboxPurged
+	} else if state.DeadLettered {
+		status = OutboxDeadLettered
+	} else if state.Acked {
+		status = OutboxAcked
+	}
+	record := OutboxRecord{Item: item, Status: status, Attempts: state.Attempt, AvailableAt: state.AvailableAt, LastError: state.LastError}
+	if !state.AckedAt.IsZero() {
+		value := state.AckedAt
+		record.AckedAt = &value
+	}
+	if !state.DeadLetterAt.IsZero() {
+		value := state.DeadLetterAt
+		record.DeadLetterAt = &value
+	}
+	if !state.PurgedAt.IsZero() {
+		value := state.PurgedAt
+		record.PurgedAt = &value
+	}
+	return record
+}
+
+func (s *JournalStore) ReplayOutbox(_ context.Context, tenantID, id string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.outbox[id]
+	if !ok || item.TenantID != tenantID {
+		return ErrNotFound
+	}
+	state := s.outboxStates[id]
+	if !state.DeadLettered || state.Purged {
+		return errors.New("only a non-purged dead-letter outbox item can be replayed")
+	}
+	state.DeadLettered = false
+	state.Owner = ""
+	state.ExpiresAt = time.Time{}
+	state.AvailableAt = now.UTC()
+	state.LastError = ""
+	state.DeadLetterAt = time.Time{}
+	record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: id, OutboxState: &state}
+	if err := s.append(record); err != nil {
+		return err
+	}
+	s.applyRecord(record)
+	return nil
+}
+
+func (s *JournalStore) PurgeOutbox(_ context.Context, tenantID string, before time.Time, limit int) (int, error) {
+	if tenantID == "" || limit <= 0 {
+		return 0, errors.New("tenant and positive outbox purge limit are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	now := time.Now().UTC()
+	for id, item := range s.outbox {
+		if count == limit || item.TenantID != tenantID || !item.CreatedAt.Before(before) {
+			continue
+		}
+		state := s.outboxStates[id]
+		if (!state.Acked && !state.DeadLettered) || state.Purged {
+			continue
+		}
+		state.Purged = true
+		state.PurgedAt = now
+		state.Owner = ""
+		state.ExpiresAt = time.Time{}
+		record := journalRecord{Version: 1, Kind: "outbox_state", OutboxID: id, OutboxState: &state}
+		if err := s.append(record); err != nil {
+			return count, err
+		}
+		s.applyRecord(record)
+		count++
+	}
+	return count, nil
 }
 
 func revocationKey(issuer, tokenID, tenantID string) string {

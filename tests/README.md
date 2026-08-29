@@ -13,7 +13,10 @@ The repository separates tests by the evidence they provide:
 | MinIO integration | [`minio/run-integration.sh`](minio/run-integration.sh) | local Docker | Actual S3-compatible Artifact Put, Stat, Get, and Delete operations |
 | Hub service smoke | [`hub/run-smoke.sh`](hub/run-smoke.sh) | no | Real Hub HTTP registration, A2A Task/Artifact exchange, and SSE replay against the Go fixture |
 | Durable outbox worker | `go test ./internal/core ./internal/worker` | no | Transaction-linked Event outbox, lease exclusion, publish-before-ack, retry, and Journal restart replay |
+| A2A Push | [`hub/run-push-smoke.sh`](hub/run-push-smoke.sh) | local loopback | Pinned Go SDK HTTP Push sender to authenticated Hub receiver, including status and Artifact delivery |
+| CloudEvents collector | [`hub/run-cloudevents-smoke.sh`](hub/run-cloudevents-smoke.sh) | local TLS loopback | CloudEvents 1.0 structured delivery, tenant identity, stable idempotency, and real HTTPS collector response |
 | Federated trust integration | `AFH_RUN_TRUST_TESTS=1 go test ./internal/hub -run TestRealTrustBundleWithOIDCMTLSPDPAndOperations` | local TLS loopback | OIDC discovery/JWKS rotation, token revocation, HTTPS PDP, authenticated rate limiting, fsync audit, and CA-verified SPIFFE mTLS |
+| Partner trust script | [`trust/run-partner-integration.sh`](trust/run-partner-integration.sh) | local TLS loopback | Repeatable partner-style IdP/PDP/central-audit success, key rotation, revocation, outage retry, and mTLS checks |
 | A2A interoperability | [`interop/run-smoke.sh`](interop/run-smoke.sh) | no | Go Hub probe against independent Go and Python A2A Agents |
 | Provider-adapter mock | [`real-api/run-mock-smoke.sh`](real-api/run-mock-smoke.sh) | no | Full A2A-to-provider path against a local compatible SSE endpoint |
 | Live provider | [`real-api/run-smoke.sh`](real-api/run-smoke.sh) | yes | End-to-end A2A Task and SSE behavior around a real model call |
@@ -99,7 +102,9 @@ OpenAI or on that provider protocol.
 Task Events are transactionally mirrored into the durable outbox by both the
 Journal and PostgreSQL stores. The outbox is an at-least-once publication
 boundary: downstream publishers must be idempotent and should use the stored
-deduplication key. See [ADR 0007](../docs/adr/0007-explicit-a2a-profile-and-durable-outbox.md).
+deduplication key. CloudEvents 1.0 delivery is selected with
+`--outbox-cloudevents-url`; operator listing, replay, and purge require
+`outbox:read`/`outbox:write`. See [ADR 0007](../docs/adr/0007-explicit-a2a-profile-and-durable-outbox.md).
 
 Run the owned TCK fixture against an existing checkout without cloning or
 modifying upstream sources:

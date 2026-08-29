@@ -23,6 +23,8 @@ jobs:
         run: go vet ./...
       - name: Race tests
         run: go test -race ./internal/...
+      - name: Shell syntax checks
+        run: find tests -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 
   a2a-pins:
     runs-on: ubuntu-latest
@@ -58,7 +60,7 @@ jobs:
           path: a2a-tck
       - name: Install pinned TCK
         run: uv sync --locked --project a2a-tck
-      - name: Run JSON-RPC and HTTP+JSON MUST matrix
+      - name: Run JSON-RPC, HTTP+JSON, and gRPC MUST matrix
         env:
           A2A_TCK_DIR: ${{ github.workspace }}/a2a-tck
           A2A_TCK_PYTHON: ${{ github.workspace }}/a2a-tck/.venv/bin/python
@@ -66,3 +68,36 @@ jobs:
           A2A_TCK_REPORT_ROOT: ${{ github.workspace }}/var/tck
           GO_BIN: go
         run: tests/conformance/run-matrix.sh
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Run partner-style trust integration
+        run: tests/trust/run-partner-integration.sh
+      - name: Run CloudEvents HTTPS smoke
+        run: tests/hub/run-cloudevents-smoke.sh
+      - name: Run A2A Push sender and receiver smoke
+        run: tests/hub/run-push-smoke.sh
+      - name: Run NATS Outbox smoke
+        run: tests/eventbus/run-nats-smoke.sh
+      - name: Run PostgreSQL backup and restart recovery smokes
+        run: |
+          tests/postgres/run-backup-restore.sh
+          tests/postgres/run-restart-recovery.sh
+          tests/postgres/run-encrypted-backup.sh
+          tests/postgres/run-ha-failover.sh
+          tests/postgres/run-pitr.sh
+          tests/minio/run-replication.sh
+      - name: Upload conformance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: federation-hub-conformance-reports
+          path: var/tck/
+          if-no-files-found: ignore

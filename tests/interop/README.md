@@ -22,7 +22,7 @@ user-facing Hub API.
 
 | Component | Revision |
 |---|---|
-| A2A protocol | `16ba52690519bf55b9388e34d4db356efa88aa51` (`1.0`) |
+| A2A protocol | `173695755607e884aa9acf8ce4feed90e32727a1` (`1.0`, normative TCK-aligned baseline) |
 | A2A Go SDK | `v2.5.0`, commit `9d95b95445f4208ba77f48a137a278067937adb7` |
 | A2A Python SDK | commit `6eee8956fa0e3d6378e4a61b52cf674d05b81229` |
 | Binding | JSON-RPC over local HTTP; SSE for streaming |

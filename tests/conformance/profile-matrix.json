@@ -1,6 +1,7 @@
 {
   "protocolVersion": "1.0",
-  "protocolSourceCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
+  "protocolSourceCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
+  "latestProtocolCandidateCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
   "goSDKModule": "github.com/a2aproject/a2a-go/v2",
   "goSDKVersion": "v2.5.0",
   "goSDKSourceCommit": "9d95b95445f4208ba77f48a137a278067937adb7",
@@ -15,7 +16,11 @@
       "status": "accepted-with-waivers",
       "tckMustPassed": 67,
       "tckMustSkipped": 25,
-      "tckMustFailed": 0
+      "tckMustNotTested": 22,
+      "tckMustFailed": 0,
+      "tckTransportPassed": 79,
+      "tckTransportSkipped": 15,
+      "tckTransportFailed": 0
     },
     {
       "name": "a2a-v1-http-json-sse",
@@ -23,19 +28,27 @@
       "streamTransport": "SSE",
       "sutBindingFlag": "http_json",
       "status": "verified-local-with-skips",
-      "tckMustPassed": 73,
-      "tckMustSkipped": 14,
-      "tckMustFailed": 0
+      "tckMustPassed": 62,
+      "tckMustSkipped": 29,
+      "tckMustNotTested": 23,
+      "tckMustFailed": 0,
+      "tckTransportPassed": 73,
+      "tckTransportSkipped": 14,
+      "tckTransportFailed": 0
     },
     {
       "name": "a2a-v1-grpc",
       "binding": "GRPC",
       "streamTransport": "server-streaming",
       "sutBindingFlag": "grpc",
-      "status": "not-implemented",
-      "tckMustPassed": 0,
-      "tckMustSkipped": 0,
-      "tckMustFailed": 0
+      "status": "verified-local-with-skips",
+      "tckMustPassed": 50,
+      "tckMustSkipped": 31,
+      "tckMustNotTested": 33,
+      "tckMustFailed": 0,
+      "tckTransportPassed": 52,
+      "tckTransportSkipped": 13,
+      "tckTransportFailed": 0
     }
   ]
 }

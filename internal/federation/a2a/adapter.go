@@ -17,6 +17,9 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 type Adapter struct {
@@ -24,12 +27,21 @@ type Adapter struct {
 	transportClient *http.Client
 	secrets         secrets.Provider
 	profiles        []BindingProfile
+	grpcDialOptions []grpc.DialOption
+	CardVerifier    CardVerifier
+}
+
+// SetCardVerifier installs an optional AgentCard signature policy. It is safe
+// to call during startup before the adapter is shared by request handlers.
+func (a *Adapter) SetCardVerifier(verifier CardVerifier) {
+	if a != nil {
+		a.CardVerifier = verifier
+	}
 }
 
 func New(timeout time.Duration, providers ...secrets.Provider) *Adapter {
 	client := &http.Client{Timeout: timeout}
-	adapter := &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client,
-		profiles: []BindingProfile{InitialBindingProfile}}
+	adapter := newAdapter(client, []BindingProfile{InitialBindingProfile}, nil)
 	if len(providers) > 0 {
 		adapter.secrets = providers[0]
 	}
@@ -40,6 +52,14 @@ func New(timeout time.Duration, providers ...secrets.Provider) *Adapter {
 // profiles. The default constructor intentionally exposes only the accepted
 // first profile; callers must opt into additional Bindings and test them.
 func NewWithProfiles(timeout time.Duration, profiles []BindingProfile, providers ...secrets.Provider) (*Adapter, error) {
+	return NewWithProfilesAndGRPCOptions(timeout, profiles, nil, providers...)
+}
+
+// NewWithProfilesAndGRPCOptions is the explicit construction path for a Hub
+// deployment that accepts gRPC. Production callers should provide TLS dial
+// options; tests and local fixtures may pass grpc.WithTransportCredentials with
+// insecure credentials explicitly.
+func NewWithProfilesAndGRPCOptions(timeout time.Duration, profiles []BindingProfile, grpcOptions []grpc.DialOption, providers ...secrets.Provider) (*Adapter, error) {
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("at least one A2A binding profile is required")
 	}
@@ -49,17 +69,31 @@ func NewWithProfiles(timeout time.Duration, profiles []BindingProfile, providers
 		}
 	}
 	client := &http.Client{Timeout: timeout}
-	adapter := &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client, profiles: append([]BindingProfile(nil), profiles...)}
+	adapter := newAdapter(client, profiles, grpcOptions)
 	if len(providers) > 0 {
 		adapter.secrets = providers[0]
 	}
 	return adapter, nil
 }
 
+func newAdapter(client *http.Client, profiles []BindingProfile, grpcOptions []grpc.DialOption) *Adapter {
+	if len(grpcOptions) == 0 {
+		grpcOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(nil))}
+	}
+	return &Adapter{resolver: &agentcard.Resolver{Client: client}, transportClient: client,
+		profiles: append([]BindingProfile(nil), profiles...), grpcDialOptions: grpcOptions}
+}
+
 func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Descriptor, error) {
 	card, err := a.resolver.Resolve(ctx, cardURL)
 	if err != nil {
 		return federation.Descriptor{}, mapError(err, false)
+	}
+	if err := a.CardVerifier.Verify(ctx, card); err != nil {
+		return federation.Descriptor{}, &federation.Error{Problem: core.Problem{
+			Category: "authentication", Code: "AGENT_CARD_SIGNATURE_INVALID",
+			Message: "remote AgentCard signature verification failed",
+		}, Cause: err}
 	}
 	endpoint, _, err := selectEndpointForProfiles(card, a.profiles)
 	if err != nil {
@@ -82,7 +116,21 @@ func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Desc
 		Streaming:         card.Capabilities.Streaming,
 		PushNotifications: card.Capabilities.PushNotifications,
 		SecuritySchemes:   schemes, Skills: skills,
+		CardSignatureVerified: len(card.Signatures) > 0,
+		CardSignatureKeyID:    firstSignatureKeyID(card),
 	}, nil
+}
+
+func firstSignatureKeyID(card *a2a.AgentCard) string {
+	if card == nil || len(card.Signatures) == 0 {
+		return ""
+	}
+	header, err := decodeProtectedHeader(card.Signatures[0].Protected)
+	if err != nil {
+		return ""
+	}
+	keyID, _ := header["kid"].(string)
+	return keyID
 }
 
 func selectEndpoint(card *a2a.AgentCard) (*a2a.AgentInterface, error) {
@@ -146,6 +194,8 @@ func (a *Adapter) client(ctx context.Context, agent core.Agent) (*a2aclient.Clie
 	}
 	if profile.Binding == a2a.TransportProtocolJSONRPC {
 		options = append(options, a2aclient.WithJSONRPCTransport(a.transportClient))
+	} else if profile.Binding == a2a.TransportProtocolGRPC {
+		options = append(options, a2agrpc.WithGRPCTransport(a.grpcDialOptions...))
 	} else {
 		options = append(options, a2aclient.WithRESTTransport(a.transportClient))
 	}

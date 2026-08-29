@@ -382,3 +382,52 @@ func TestJournalTaskEventIsAtomicallyEnqueuedInOutbox(t *testing.T) {
 		t.Fatalf("acked outbox replayed after restart: %+v err=%v", replayed, err)
 	}
 }
+
+func TestJournalOutboxAdministrationIsTenantScopedAndReplayable(t *testing.T) {
+	store, err := OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	if _, err := store.CreateTask(ctx, Task{ID: "task-admin", TenantID: "tenant-a", AgentID: "agent-1", State: TaskStateSubmitted, CreatedAt: now, UpdatedAt: now}, Event{Type: "task.submitted", State: TaskStateSubmitted, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := store.ClaimOutbox(ctx, "publisher", 1, now, time.Minute)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("leases=%+v err=%v", leases, err)
+	}
+	if err := store.DeadLetterOutbox(ctx, leases[0], "collector unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.ListOutbox(ctx, "tenant-a", OutboxDeadLettered, 10)
+	if err != nil || len(records) != 1 || records[0].LastError != "collector unavailable" {
+		t.Fatalf("dead letters=%+v err=%v", records, err)
+	}
+	if other, err := store.ListOutbox(ctx, "tenant-b", "", 10); err != nil || len(other) != 0 {
+		t.Fatalf("cross-tenant records=%+v err=%v", other, err)
+	}
+	if err := store.ReplayOutbox(ctx, "tenant-a", records[0].Item.ID, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.ListOutbox(ctx, "tenant-a", OutboxPending, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("replayed records=%+v err=%v", pending, err)
+	}
+	leases, err = store.ClaimOutbox(ctx, "publisher-2", 1, now.Add(2*time.Minute), time.Minute)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("replay claim=%+v err=%v", leases, err)
+	}
+	if err := store.AckOutbox(ctx, leases[0]); err != nil {
+		t.Fatal(err)
+	}
+	purged, err := store.PurgeOutbox(ctx, "tenant-a", now.Add(time.Hour), 10)
+	if err != nil || purged != 1 {
+		t.Fatalf("purged=%d err=%v", purged, err)
+	}
+	records, err = store.ListOutbox(ctx, "tenant-a", OutboxPurged, 10)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("purged records=%+v err=%v", records, err)
+	}
+}

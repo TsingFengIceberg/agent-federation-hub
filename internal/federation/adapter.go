@@ -9,15 +9,17 @@ import (
 )
 
 type Descriptor struct {
-	Name              string
-	ProviderVersion   string
-	ProtocolBinding   string
-	ProtocolVersion   string
-	Endpoint          string
-	Streaming         bool
-	PushNotifications bool
-	SecuritySchemes   []string
-	Skills            []string
+	Name                  string
+	ProviderVersion       string
+	ProtocolBinding       string
+	ProtocolVersion       string
+	Endpoint              string
+	Streaming             bool
+	PushNotifications     bool
+	SecuritySchemes       []string
+	Skills                []string
+	CardSignatureVerified bool
+	CardSignatureKeyID    string
 }
 
 type Message struct {

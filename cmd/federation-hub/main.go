@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,10 +20,15 @@ import (
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/agentconfig"
 	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 	a2afederation "github.com/TsingFengIceberg/agent-federation-hub/internal/federation/a2a"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/gateway"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/hub"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/registry"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/worker"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 func main() {
@@ -46,6 +53,16 @@ func main() {
 	policyTokenReference := flag.String("policy-token-ref", "", "optional SecretProvider reference for the policy endpoint Bearer token")
 	tokenProfilesFile := flag.String("token-exchange-profiles-file", "", "JSON RFC 8693 token exchange profile map")
 	remoteTimeout := flag.Duration("remote-timeout", 30*time.Second, "Agent Card and A2A request timeout")
+	a2aProfiles := flag.String("a2a-profiles", "JSONRPC", "ordered A2A binding profiles: JSONRPC, HTTP_JSON, or GRPC")
+	a2aGRPCCAFile := flag.String("a2a-grpc-ca-file", "", "optional PEM CA bundle for outbound A2A gRPC TLS")
+	a2aGRPCServerName := flag.String("a2a-grpc-server-name", "", "optional TLS server name for outbound A2A gRPC")
+	a2aCardSignatureKeyFile := flag.String("a2a-card-signature-key-file", "", "PEM public key used to verify signed AgentCards")
+	a2aCardSignatureKeyID := flag.String("a2a-card-signature-key-id", "", "trusted key ID for signed AgentCards")
+	a2aRequireSignedCards := flag.Bool("a2a-require-signed-cards", false, "reject AgentCards without a valid configured JWS signature")
+	registryURL := flag.String("registry-url", "", "optional HTTPS Agent Registry endpoint")
+	registryTokenReference := flag.String("registry-token-ref", "", "optional SecretProvider reference for the Agent Registry")
+	gatewayURL := flag.String("gateway-url", "", "optional HTTPS A2A Gateway endpoint for outbound calls")
+	gatewayTokenReference := flag.String("gateway-token-ref", "", "optional SecretProvider reference for the A2A Gateway")
 	reconcileInterval := flag.Duration("reconcile-interval", 30*time.Second, "interval for polling recoverable remote Tasks")
 	workerID := flag.String("worker-id", "", "unique background worker identity; generated when empty")
 	leaseDuration := flag.Duration("worker-lease-duration", 30*time.Second, "background reconciliation lease duration")
@@ -76,7 +93,12 @@ func main() {
 	auditURL := flag.String("audit-url", "", "optional HTTPS central audit collector endpoint")
 	auditTokenReference := flag.String("audit-token-ref", "", "optional SecretProvider reference for the central audit collector")
 	outboxURL := flag.String("outbox-url", "", "optional HTTPS endpoint for durable Task Event outbox delivery")
+	outboxCloudEventsURL := flag.String("outbox-cloudevents-url", "", "optional HTTPS CloudEvents 1.0 collector endpoint")
+	outboxCloudEventsSource := flag.String("outbox-cloudevents-source", "urn:agent-federation-hub", "CloudEvents source URI")
+	outboxCloudEventsCAFile := flag.String("outbox-cloudevents-ca-file", "", "optional PEM CA bundle for the CloudEvents collector")
 	outboxFile := flag.String("outbox-file", "", "optional 0600 JSONL file for local durable Task Event outbox delivery")
+	outboxNATSURL := flag.String("outbox-nats-url", "", "optional NATS or TLS NATS endpoint for durable Task Event delivery")
+	outboxNATSSubject := flag.String("outbox-nats-subject", "afh.task-events", "NATS subject for durable Task Event delivery")
 	outboxTokenReference := flag.String("outbox-token-ref", "", "optional SecretProvider reference for the outbox endpoint Bearer token")
 	outboxMaxAttempts := flag.Uint("outbox-max-attempts", 12, "maximum Outbox delivery attempts before dead-lettering; zero means unlimited")
 	workerDrainTimeout := flag.Duration("worker-drain-timeout", 15*time.Second, "maximum time allowed for background workers to drain during shutdown")
@@ -93,11 +115,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if *outboxTokenReference != "" && *outboxURL == "" {
-		log.Fatal("--outbox-token-ref requires --outbox-url")
+	configuredOutboxSinks := 0
+	for _, configured := range []string{*outboxURL, *outboxCloudEventsURL, *outboxFile, *outboxNATSURL} {
+		if configured != "" {
+			configuredOutboxSinks++
+		}
 	}
-	if *outboxURL != "" && *outboxFile != "" {
-		log.Fatal("--outbox-url and --outbox-file are mutually exclusive")
+	if configuredOutboxSinks > 1 ||
+		(*outboxURL != "" && *outboxFile != "") ||
+		(*outboxCloudEventsURL != "" && *outboxFile != "") {
+		log.Fatal("--outbox-url, --outbox-cloudevents-url, --outbox-file, and --outbox-nats-url are mutually exclusive")
+	}
+	if *outboxTokenReference != "" && *outboxCloudEventsURL == "" && *outboxURL == "" && *outboxNATSURL == "" {
+		log.Fatal("--outbox-token-ref requires --outbox-url, --outbox-cloudevents-url, or --outbox-nats-url")
 	}
 	var outboxPublisher worker.OutboxPublisher
 	outboxMetrics := &worker.OutboxMetrics{}
@@ -118,10 +148,52 @@ func main() {
 		publisher.Client = &http.Client{Timeout: 10 * time.Second}
 		outboxPublisher = publisher
 	}
+	if *outboxCloudEventsURL != "" {
+		if err := baseSecretProvider.ValidateReference(*outboxTokenReference); err != nil && *outboxTokenReference != "" {
+			log.Fatalf("CloudEvents token reference: %v", err)
+		}
+		var bearer func(context.Context) (string, error)
+		if *outboxTokenReference != "" {
+			bearer = func(ctx context.Context) (string, error) {
+				return secretProvider.Resolve(ctx, *outboxTokenReference)
+			}
+		}
+		publisher, publisherErr := worker.NewCloudEventsPublisher(*outboxCloudEventsURL, *outboxCloudEventsSource, bearer)
+		if publisherErr != nil {
+			log.Fatalf("CloudEvents outbox publisher: %v", publisherErr)
+		}
+		if *outboxCloudEventsCAFile != "" {
+			encoded, readErr := os.ReadFile(*outboxCloudEventsCAFile)
+			if readErr != nil {
+				log.Fatalf("read CloudEvents CA bundle: %v", readErr)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(encoded) {
+				log.Fatal("CloudEvents CA bundle contains no certificates")
+			}
+			publisher.Client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+		}
+		outboxPublisher = publisher
+	}
 	if *outboxFile != "" {
 		publisher, publisherErr := worker.NewFileOutboxPublisher(*outboxFile)
 		if publisherErr != nil {
 			log.Fatalf("outbox file publisher: %v", publisherErr)
+		}
+		defer publisher.Close()
+		outboxPublisher = publisher
+	}
+	if *outboxNATSURL != "" {
+		if err := baseSecretProvider.ValidateReference(*outboxTokenReference); err != nil && *outboxTokenReference != "" {
+			log.Fatalf("NATS token reference: %v", err)
+		}
+		var token func(context.Context) (string, error)
+		if *outboxTokenReference != "" {
+			token = func(ctx context.Context) (string, error) { return secretProvider.Resolve(ctx, *outboxTokenReference) }
+		}
+		publisher, publisherErr := worker.NewNATSPublisher(*outboxNATSURL, *outboxNATSSubject, token)
+		if publisherErr != nil {
+			log.Fatalf("NATS outbox publisher: %v", publisherErr)
 		}
 		defer publisher.Close()
 		outboxPublisher = publisher
@@ -193,9 +265,74 @@ func main() {
 	if len(auditSinks) > 0 {
 		auditSink = access.FanoutAuditSink(auditSinks)
 	}
-	adapter := a2afederation.New(*remoteTimeout, secretProvider)
+	profiles, err := a2afederation.ParseBindingProfiles(*a2aProfiles)
+	if err != nil {
+		log.Fatalf("A2A profiles: %v", err)
+	}
+	grpcOptions, err := buildGRPCDialOptions(*a2aGRPCCAFile, *a2aGRPCServerName)
+	if err != nil {
+		log.Fatalf("A2A gRPC TLS: %v", err)
+	}
+	adapter, err := a2afederation.NewWithProfilesAndGRPCOptions(*remoteTimeout, profiles, grpcOptions, secretProvider)
+	if err != nil {
+		log.Fatalf("A2A adapter: %v", err)
+	}
+	if *a2aCardSignatureKeyFile != "" {
+		if *a2aCardSignatureKeyID == "" {
+			log.Fatal("--a2a-card-signature-key-id is required with --a2a-card-signature-key-file")
+		}
+		encoded, readErr := os.ReadFile(*a2aCardSignatureKeyFile)
+		if readErr != nil {
+			log.Fatalf("read AgentCard signature key: %v", readErr)
+		}
+		key, parseErr := hub.ParsePublicKeyPEM(encoded)
+		if parseErr != nil {
+			log.Fatalf("parse AgentCard signature key: %v", parseErr)
+		}
+		adapter.SetCardVerifier(a2afederation.CardVerifier{
+			Required: *a2aRequireSignedCards,
+			Resolver: a2afederation.StaticCardSignatureResolver{*a2aCardSignatureKeyID: key},
+		})
+	} else if *a2aRequireSignedCards {
+		log.Fatal("--a2a-require-signed-cards requires --a2a-card-signature-key-file")
+	}
+	var outboundAdapter federation.Adapter = adapter
+	if *gatewayURL != "" {
+		if *gatewayTokenReference != "" {
+			if err := baseSecretProvider.ValidateReference(*gatewayTokenReference); err != nil {
+				log.Fatalf("gateway token reference: %v", err)
+			}
+		}
+		var bearer func(context.Context) (string, error)
+		if *gatewayTokenReference != "" {
+			bearer = func(ctx context.Context) (string, error) { return secretProvider.Resolve(ctx, *gatewayTokenReference) }
+		}
+		outboundAdapter, err = gateway.NewHTTPAdapter(*gatewayURL, adapter, bearer)
+		if err != nil {
+			log.Fatalf("A2A Gateway: %v", err)
+		}
+	}
+	var externalRegistry registry.Client
+	if *registryURL != "" {
+		if *registryTokenReference != "" {
+			if err := baseSecretProvider.ValidateReference(*registryTokenReference); err != nil {
+				log.Fatalf("registry token reference: %v", err)
+			}
+		}
+		var bearer func(context.Context) (string, error)
+		if *registryTokenReference != "" {
+			bearer = func(ctx context.Context) (string, error) { return secretProvider.Resolve(ctx, *registryTokenReference) }
+		}
+		externalRegistry, err = registry.NewHTTPClient(*registryURL, bearer)
+		if err != nil {
+			log.Fatalf("Agent Registry: %v", err)
+		}
+		if err := externalRegistry.Health(context.Background()); err != nil {
+			log.Fatalf("Agent Registry health: %v", err)
+		}
+	}
 	service := &hub.Service{
-		Store: store, Adapter: adapter, PublicBaseURL: *publicBaseURL,
+		Store: store, Adapter: outboundAdapter, PublicBaseURL: *publicBaseURL,
 		AllowPrivateAgentURLs: *allowPrivateAgentURLs,
 		Secrets:               secretProvider,
 		Artifacts:             artifacts,
@@ -219,6 +356,11 @@ func main() {
 				)
 				if registerErr != nil {
 					log.Fatalf("register configured Agent %q: %v", registration.ID, registerErr)
+				}
+				if externalRegistry != nil {
+					if err := externalRegistry.Register(context.Background(), registered); err != nil {
+						log.Fatalf("publish Agent %q to external Registry: %v", registration.ID, err)
+					}
 				}
 				log.Printf("registered configured Agent %q (%s)", registered.ID, registered.Name)
 			}
@@ -400,4 +542,20 @@ func parseAllowlist(value string) map[string]struct{} {
 		}
 	}
 	return result
+}
+
+func buildGRPCDialOptions(caFile, serverName string) ([]grpc.DialOption, error) {
+	config := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: strings.TrimSpace(serverName)}
+	if caFile != "" {
+		encoded, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read gRPC CA bundle: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(encoded) {
+			return nil, errors.New("gRPC CA bundle contains no certificates")
+		}
+		config.RootCAs = pool
+	}
+	return []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(config))}, nil
 }

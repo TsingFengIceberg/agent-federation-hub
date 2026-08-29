@@ -74,24 +74,26 @@ type Problem struct {
 }
 
 type Agent struct {
-	ID                string            `json:"id"`
-	TenantID          string            `json:"tenantId"`
-	CardURL           string            `json:"cardUrl"`
-	Name              string            `json:"name"`
-	ProviderVersion   string            `json:"providerVersion,omitempty"`
-	ProtocolBinding   string            `json:"protocolBinding"`
-	ProtocolVersion   string            `json:"protocolVersion"`
-	Endpoint          string            `json:"endpoint"`
-	Streaming         bool              `json:"streaming"`
-	PushNotifications bool              `json:"pushNotifications"`
-	SecuritySchemes   []string          `json:"securitySchemes,omitempty"`
-	Skills            []string          `json:"skills,omitempty"`
-	CredentialEnv     map[string]string `json:"credentialEnv,omitempty"`
-	HealthStatus      string            `json:"healthStatus,omitempty"`
-	HealthMessage     string            `json:"healthMessage,omitempty"`
-	LastHealthCheckAt *time.Time        `json:"lastHealthCheckAt,omitempty"`
-	CreatedAt         time.Time         `json:"createdAt"`
-	UpdatedAt         time.Time         `json:"updatedAt"`
+	ID                    string            `json:"id"`
+	TenantID              string            `json:"tenantId"`
+	CardURL               string            `json:"cardUrl"`
+	Name                  string            `json:"name"`
+	ProviderVersion       string            `json:"providerVersion,omitempty"`
+	ProtocolBinding       string            `json:"protocolBinding"`
+	ProtocolVersion       string            `json:"protocolVersion"`
+	Endpoint              string            `json:"endpoint"`
+	Streaming             bool              `json:"streaming"`
+	PushNotifications     bool              `json:"pushNotifications"`
+	SecuritySchemes       []string          `json:"securitySchemes,omitempty"`
+	CardSignatureVerified bool              `json:"cardSignatureVerified,omitempty"`
+	CardSignatureKeyID    string            `json:"cardSignatureKeyId,omitempty"`
+	Skills                []string          `json:"skills,omitempty"`
+	CredentialEnv         map[string]string `json:"credentialEnv,omitempty"`
+	HealthStatus          string            `json:"healthStatus,omitempty"`
+	HealthMessage         string            `json:"healthMessage,omitempty"`
+	LastHealthCheckAt     *time.Time        `json:"lastHealthCheckAt,omitempty"`
+	CreatedAt             time.Time         `json:"createdAt"`
+	UpdatedAt             time.Time         `json:"updatedAt"`
 }
 
 const (
@@ -172,6 +174,28 @@ type OutboxLease struct {
 	Owner     string     `json:"owner"`
 	ExpiresAt time.Time  `json:"expiresAt"`
 	Attempt   uint32     `json:"attempt"`
+}
+
+type OutboxStatus string
+
+const (
+	OutboxPending      OutboxStatus = "PENDING"
+	OutboxAcked        OutboxStatus = "ACKED"
+	OutboxDeadLettered OutboxStatus = "DEAD_LETTERED"
+	OutboxPurged       OutboxStatus = "PURGED"
+)
+
+// OutboxRecord is the operator-visible projection of a durable publication.
+// Payload is retained so an authorized replay can reconstruct the same event.
+type OutboxRecord struct {
+	Item         OutboxItem   `json:"item"`
+	Status       OutboxStatus `json:"status"`
+	Attempts     uint32       `json:"attempts"`
+	AvailableAt  time.Time    `json:"availableAt"`
+	LastError    string       `json:"lastError,omitempty"`
+	AckedAt      *time.Time   `json:"ackedAt,omitempty"`
+	DeadLetterAt *time.Time   `json:"deadLetteredAt,omitempty"`
+	PurgedAt     *time.Time   `json:"purgedAt,omitempty"`
 }
 
 type TokenRevocation struct {

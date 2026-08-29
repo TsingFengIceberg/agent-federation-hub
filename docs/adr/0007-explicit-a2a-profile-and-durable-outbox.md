@@ -23,10 +23,12 @@ HTTP, and SSE for streaming. The machine-readable profile is
 Agent Card selection must match a configured `(protocolVersion, binding)` pair
 exactly. The default adapter accepts only that profile.
 
-The Go adapter exposes an opt-in ordered profile constructor. It currently
-supports the A2A SDK's JSON-RPC and HTTP+JSON transports, but HTTP+JSON is not
-promoted to an accepted product profile until an owned fixture and aligned
-current-spec conformance evidence exist. gRPC remains a separate future gate.
+The Go adapter exposes an opt-in ordered profile constructor and supports the
+A2A SDK's JSON-RPC, HTTP+JSON, and gRPC transports. gRPC is intentionally
+opt-in with an explicit endpoint/TLS dial configuration; the default remains
+JSON-RPC+SSE. The repository-owned fixture and aligned TCK matrix exercise all
+three transports, while authentication, Push sender, and signed-card behavior
+remain separate capability gates.
 No SDK fallback may silently expand the advertised support matrix.
 
 ### 2. Task events produce an outbox record in the same commit
@@ -41,10 +43,17 @@ replaceable idempotent publisher, and acknowledges only after publication.
 Failures are rescheduled with bounded backoff. The delivery guarantee is
 at-least-once; exactly-once external side effects are not claimed.
 
-The executable Hub accepts either an HTTPS collector (`--outbox-url`) or a
-0600 append-only JSONL development sink (`--outbox-file`). The latter is useful
-for local inspection and restart tests; a managed event bus remains an
-operator integration rather than a built-in dependency.
+The executable Hub accepts an HTTPS collector (`--outbox-url`), a
+CloudEvents 1.0 structured-mode collector (`--outbox-cloudevents-url`), or a
+0600 append-only JSONL development sink (`--outbox-file`). The CloudEvents
+publisher carries the stable tenant/deduplication identity and preserves the
+Task Event payload as `data`; a managed event bus remains an operator
+integration rather than a built-in dependency.
+
+Operators can inspect records through tenant-scoped `GET /v1/outbox`, replay a
+non-purged dead letter with `POST /v1/outbox/{id}/replay`, and apply bounded
+retention with `POST /v1/outbox/purge?before=<RFC3339>&limit=<n>`. These routes
+require `outbox:read` or `outbox:write` and never cross tenant boundaries.
 
 PostgreSQL schema migration `003_outbox.sql` adds the queue and its pending
 index. The migration runner records SHA-256 checksums in
@@ -59,14 +68,21 @@ transaction advisory lock, and fails if an applied migration is modified.
   publish/acknowledgement crash window.
 - The Journal remains useful for local development, but PostgreSQL plus an
   external object store remains the production deployment direction.
-- Outbox retention, dead-letter administration, and managed event-bus operations
-  are still operational work, not solved by this ADR.
+- The local/HTTPS/CloudEvents sinks do not provide a broker's partitioning,
+  consumer offsets, or cross-region replication; managed event-bus operations
+  remain deployment work.
 
 ## Verification
 
 - `internal/core/store_test.go` verifies atomic Journal event/outbox creation,
   lease exclusion, acknowledgement, and restart replay.
 - `internal/worker/outbox_test.go` verifies publish-before-ack and retry delay.
+- `internal/worker/http_outbox_test.go` verifies CloudEvents 1.0 structured
+  payloads, stable identity headers, and HTTPS enforcement.
+- `internal/core/store_test.go` and `internal/hub/http_test.go` verify
+  tenant-scoped dead-letter listing, replay, and retention operations.
+- [`run-cloudevents-smoke.sh`](../../tests/hub/run-cloudevents-smoke.sh) verifies
+  an actual HTTPS collector receiving structured events from a running Hub.
 - `internal/core/postgres_integration_test.go` verifies PostgreSQL transactional
   outbox creation and multi-instance lease exclusion when PostgreSQL is enabled.
 - `tests/conformance/profile_test.go` verifies that protocol pins and accepted

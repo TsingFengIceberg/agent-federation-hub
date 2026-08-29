@@ -39,6 +39,36 @@ func validateHTTPURL(raw string, publicOnly bool) error {
 	return nil
 }
 
+func validateAgentEndpoint(binding, raw string, publicOnly bool) error {
+	if strings.EqualFold(strings.ReplaceAll(binding, "_", ""), "GRPC") {
+		value := strings.TrimSpace(raw)
+		if value == "" || strings.Contains(value, "@") {
+			return errors.New("gRPC endpoint must be non-empty and cannot contain user information")
+		}
+		parsed, err := url.Parse(value)
+		if err != nil {
+			return err
+		}
+		if parsed.Scheme == "http" || parsed.Scheme == "https" {
+			return validateHTTPURL(value, publicOnly)
+		}
+		if publicOnly {
+			return errors.New("public gRPC endpoint must use an HTTPS authority")
+		}
+		// Local gRPC fixtures commonly use passthrough:///host:port or a bare
+		// host:port target. They are accepted only with the explicit private URL
+		// development switch.
+		if strings.HasPrefix(value, "passthrough:///") || strings.HasPrefix(value, "dns:///") {
+			return nil
+		}
+		if _, _, err := net.SplitHostPort(value); err == nil {
+			return nil
+		}
+		return errors.New("gRPC endpoint must be an HTTPS URL or host:port target")
+	}
+	return validateHTTPURL(raw, publicOnly)
+}
+
 func isPublicIP(ip net.IP) bool {
 	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast())

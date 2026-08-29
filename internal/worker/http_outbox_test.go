@@ -84,3 +84,36 @@ func TestHTTPOutboxPublisherRejectsNonHTTPSEndpoint(t *testing.T) {
 		t.Fatal("non-HTTPS outbox endpoint accepted")
 	}
 }
+
+func TestCloudEventsPublisherUsesStructuredEventAndStableIdentity(t *testing.T) {
+	var request *http.Request
+	var payload CloudEvent
+	publisher, err := NewCloudEventsPublisher("https://collector.example/events", "urn:test:hub", func(context.Context) (string, error) { return "token", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		request = r
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+	item := core.OutboxItem{ID: "outbox-2", TenantID: "tenant-a", TaskID: "task-2", DedupKey: "event-2", Topic: "task.completed", Payload: json.RawMessage(`{"state":"COMPLETED"}`), CreatedAt: time.Date(2026, 8, 29, 1, 2, 3, 0, time.UTC)}
+	if err := publisher.Publish(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if request.Header.Get("Content-Type") != "application/cloudevents+json; charset=utf-8" ||
+		request.Header.Get("Idempotency-Key") != "tenant-a:event-2" || request.Header.Get("Ce-Type") != "task.completed" {
+		t.Fatalf("headers=%v", request.Header)
+	}
+	if payload.SpecVersion != "1.0" || payload.ID != item.ID || payload.Source != "urn:test:hub" || payload.Subject != item.TaskID || string(payload.Data) != string(item.Payload) {
+		t.Fatalf("CloudEvent=%+v", payload)
+	}
+}
+
+func TestCloudEventsPublisherRejectsNonHTTPSEndpoint(t *testing.T) {
+	if _, err := NewCloudEventsPublisher("http://collector.example/events", "", nil); err == nil {
+		t.Fatal("expected HTTPS validation error")
+	}
+}

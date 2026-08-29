@@ -609,7 +609,7 @@ func (s *PostgresStore) ClaimOutbox(
 	rows, err := s.pool.Query(ctx, `
 		WITH candidates AS (
 			SELECT id FROM afh_outbox
-			WHERE acked_at IS NULL AND dead_lettered_at IS NULL AND available_at <= $1
+			WHERE acked_at IS NULL AND dead_lettered_at IS NULL AND purged_at IS NULL AND available_at <= $1
 			  AND (lease_owner = '' OR lease_expires_at <= $1)
 			ORDER BY available_at, created_at, id
 			FOR UPDATE SKIP LOCKED
@@ -651,7 +651,7 @@ func (s *PostgresStore) RenewOutboxLease(
 	expiresAt := now.Add(duration)
 	command, err := s.pool.Exec(ctx, `
 		UPDATE afh_outbox SET lease_expires_at=$1
-		WHERE id=$2 AND lease_owner=$3 AND lease_expires_at>$4 AND acked_at IS NULL`,
+		WHERE id=$2 AND lease_owner=$3 AND lease_expires_at>$4 AND acked_at IS NULL AND purged_at IS NULL`,
 		expiresAt, lease.Item.ID, lease.Owner, now)
 	if err != nil {
 		return OutboxLease{}, err
@@ -679,7 +679,7 @@ func (s *PostgresStore) AckOutbox(ctx context.Context, lease OutboxLease) error 
 func (s *PostgresStore) RetryOutbox(ctx context.Context, lease OutboxLease, availableAt time.Time) error {
 	command, err := s.pool.Exec(ctx, `
 		UPDATE afh_outbox SET available_at=$1, lease_owner='', lease_expires_at=NULL
-		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL AND dead_lettered_at IS NULL`, availableAt, lease.Item.ID, lease.Owner)
+		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL AND dead_lettered_at IS NULL AND purged_at IS NULL`, availableAt, lease.Item.ID, lease.Owner)
 	if err != nil {
 		return err
 	}
@@ -693,7 +693,7 @@ func (s *PostgresStore) DeadLetterOutbox(ctx context.Context, lease OutboxLease,
 	command, err := s.pool.Exec(ctx, `
 		UPDATE afh_outbox
 		SET dead_lettered_at=now(), last_error=$1, lease_owner='', lease_expires_at=NULL
-		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL AND dead_lettered_at IS NULL`,
+		WHERE id=$2 AND lease_owner=$3 AND acked_at IS NULL AND dead_lettered_at IS NULL AND purged_at IS NULL`,
 		reason, lease.Item.ID, lease.Owner)
 	if err != nil {
 		return err
@@ -702,6 +702,74 @@ func (s *PostgresStore) DeadLetterOutbox(ctx context.Context, lease OutboxLease,
 		return ErrLeaseLost
 	}
 	return nil
+}
+
+func (s *PostgresStore) ListOutbox(ctx context.Context, tenantID string, status OutboxStatus, limit int) ([]OutboxRecord, error) {
+	if tenantID == "" || limit <= 0 {
+		return nil, errors.New("tenant and positive outbox limit are required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, task_id, dedup_key, topic, payload, created_at,
+			available_at, attempts, last_error, acked_at, dead_lettered_at, purged_at,
+			CASE WHEN purged_at IS NOT NULL THEN 'PURGED'
+			     WHEN dead_lettered_at IS NOT NULL THEN 'DEAD_LETTERED'
+			     WHEN acked_at IS NOT NULL THEN 'ACKED' ELSE 'PENDING' END AS status
+		FROM afh_outbox
+		WHERE tenant_id=$1 AND ($2='' OR (CASE WHEN purged_at IS NOT NULL THEN 'PURGED'
+			WHEN dead_lettered_at IS NOT NULL THEN 'DEAD_LETTERED'
+			WHEN acked_at IS NOT NULL THEN 'ACKED' ELSE 'PENDING' END)=$2)
+		ORDER BY created_at, id LIMIT $3`, tenantID, string(status), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]OutboxRecord, 0)
+	for rows.Next() {
+		var record OutboxRecord
+		var statusText string
+		if err := rows.Scan(&record.Item.ID, &record.Item.TenantID, &record.Item.TaskID,
+			&record.Item.DedupKey, &record.Item.Topic, &record.Item.Payload, &record.Item.CreatedAt,
+			&record.AvailableAt, &record.Attempts, &record.LastError, &record.AckedAt,
+			&record.DeadLetterAt, &record.PurgedAt, &statusText); err != nil {
+			return nil, err
+		}
+		record.Status = OutboxStatus(statusText)
+		result = append(result, record)
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) ReplayOutbox(ctx context.Context, tenantID, id string, now time.Time) error {
+	command, err := s.pool.Exec(ctx, `
+		UPDATE afh_outbox SET dead_lettered_at=NULL, last_error='', available_at=$1,
+			lease_owner='', lease_expires_at=NULL
+		WHERE id=$2 AND tenant_id=$3 AND dead_lettered_at IS NOT NULL AND purged_at IS NULL AND acked_at IS NULL`, now.UTC(), id, tenantID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) PurgeOutbox(ctx context.Context, tenantID string, before time.Time, limit int) (int, error) {
+	if tenantID == "" || limit <= 0 {
+		return 0, errors.New("tenant and positive outbox purge limit are required")
+	}
+	command, err := s.pool.Exec(ctx, `
+		WITH candidates AS (
+			SELECT id FROM afh_outbox
+			WHERE tenant_id=$1 AND created_at < $2 AND purged_at IS NULL
+			  AND (acked_at IS NOT NULL OR dead_lettered_at IS NOT NULL)
+			ORDER BY created_at, id LIMIT $3
+		)
+		UPDATE afh_outbox AS outbox SET purged_at=now(), lease_owner='', lease_expires_at=NULL
+		FROM candidates WHERE outbox.id=candidates.id`, tenantID, before.UTC(), limit)
+	if err != nil {
+		return 0, err
+	}
+	return int(command.RowsAffected()), nil
 }
 
 func (s *PostgresStore) RevokeToken(ctx context.Context, revocation TokenRevocation) error {

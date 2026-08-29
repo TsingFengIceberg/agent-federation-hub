@@ -49,7 +49,9 @@ func TestRealTrustBundleWithOIDCMTLSPDPAndOperations(t *testing.T) {
 		discoveryCalls int
 		jwksCalls      int
 		pdpCalls       int
-	}{keys: []jsonWebKey{ecJWK("key-1", publicOne)}}
+		auditCalls     int
+		auditAvailable bool
+	}{keys: []jsonWebKey{ecJWK("key-1", publicOne)}, auditAvailable: true}
 
 	identityHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		state.Lock()
@@ -71,6 +73,13 @@ func TestRealTrustBundleWithOIDCMTLSPDPAndOperations(t *testing.T) {
 				return
 			}
 			writeJSONForTrust(response, map[string]any{"allow": true, "decisionId": "decision-1"})
+		case "/audit":
+			state.auditCalls++
+			if !state.auditAvailable {
+				response.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			response.WriteHeader(http.StatusAccepted)
 		default:
 			response.WriteHeader(http.StatusNotFound)
 		}
@@ -180,6 +189,29 @@ func TestRealTrustBundleWithOIDCMTLSPDPAndOperations(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "rate_limited") {
 		t.Fatalf("audit did not persist rate-limit decision: %s", content)
+	}
+	central, err := access.NewHTTPAuditSink(identityServer.URL+"/audit", func(context.Context) (string, error) { return "audit-token", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	central.Client = identityServer.Client()
+	record := access.AuditRecord{RequestID: "integration-audit", Decision: "authorization_allowed", Action: access.ActionTaskRead, Subject: "subject", TenantID: "tenant-a"}
+	if err := central.Record(context.Background(), record); err != nil {
+		t.Fatalf("central audit success: %v", err)
+	}
+	state.Lock()
+	state.auditAvailable = false
+	state.Unlock()
+	retrying := &access.RetryingAuditSink{Sink: central, Attempts: 2, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond, Sleep: func(context.Context, time.Duration) error { return nil }}
+	if err := retrying.Record(context.Background(), record); err == nil {
+		t.Fatal("central audit outage was not surfaced")
+	}
+	state.Lock()
+	state.auditAvailable = true
+	auditCalls := state.auditCalls
+	state.Unlock()
+	if auditCalls < 3 {
+		t.Fatalf("central audit calls=%d, expected success plus bounded outage retries", auditCalls)
 	}
 
 	testRealMTLSWorkload(t)

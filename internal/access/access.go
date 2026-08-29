@@ -49,6 +49,9 @@ const (
 	ActionAgentRegister  Action = "agent.register"
 	ActionAgentList      Action = "agent.list"
 	ActionAgentRefresh   Action = "agent.refresh"
+	ActionOutboxList     Action = "outbox.list"
+	ActionOutboxReplay   Action = "outbox.replay"
+	ActionOutboxPurge    Action = "outbox.purge"
 	ActionTaskSubmit     Action = "task.submit"
 	ActionTaskContinue   Action = "task.continue"
 	ActionTaskRead       Action = "task.read"
@@ -78,6 +81,9 @@ func DefaultScopeAuthorizer() *ScopeAuthorizer {
 		ActionAgentRegister:  "agents:write",
 		ActionAgentList:      "agents:read",
 		ActionAgentRefresh:   "agents:write",
+		ActionOutboxList:     "outbox:read",
+		ActionOutboxReplay:   "outbox:write",
+		ActionOutboxPurge:    "outbox:write",
 		ActionTaskSubmit:     "tasks:submit",
 		ActionTaskContinue:   "tasks:continue",
 		ActionTaskRead:       "tasks:read",

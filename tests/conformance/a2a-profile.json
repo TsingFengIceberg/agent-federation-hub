@@ -1,7 +1,8 @@
 {
 	"profileName": "a2a-v1-jsonrpc-sse",
   "protocolVersion": "1.0",
-  "protocolSourceCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
+  "protocolSourceCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
+  "latestProtocolCandidateCommit": "16ba52690519bf55b9388e34d4db356efa88aa51",
   "binding": "JSONRPC",
   "streamTransport": "SSE",
 	"supportedBindings": ["JSONRPC"],
@@ -12,7 +13,7 @@
   "evaluatedTCKCommit": "5996b79f9cefa6fc390980e383e358a66fb9e49e",
   "evaluatedTCKProtocolCommit": "173695755607e884aa9acf8ce4feed90e32727a1",
   "repositoryContractStatus": "verified-local",
-  "externalTCKStatus": "unresolved-revision-skew",
+  "externalTCKStatus": "aligned-v1.0.0",
   "ownedSUT": "cmd/a2a-tck-sut",
   "ownedSUTProfile": "JSONRPC+SSE",
   "ownedSUTStatus": "implemented",

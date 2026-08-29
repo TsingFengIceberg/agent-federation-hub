@@ -45,6 +45,7 @@ type AgentRegistrationPolicy struct {
 	RequireStreaming         bool
 	RequirePushNotifications bool
 	RequiredSkills           []string
+	AllowedSkills            []string
 }
 
 type SubmitTaskInput struct {
@@ -111,7 +112,7 @@ func (s *Service) RefreshAgent(ctx context.Context, tenantID, agentID string) (c
 		_ = s.Store.PutAgent(ctx, agent)
 		return agent, discoverErr
 	}
-	if err := validateHTTPURL(descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
+	if err := validateAgentEndpoint(descriptor.ProtocolBinding, descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
 		return agent, fmt.Errorf("Agent endpoint URL: %w", err)
 	}
 	agent.Name = descriptor.Name
@@ -122,6 +123,8 @@ func (s *Service) RefreshAgent(ctx context.Context, tenantID, agentID string) (c
 	agent.Streaming = descriptor.Streaming
 	agent.PushNotifications = descriptor.PushNotifications
 	agent.SecuritySchemes = descriptor.SecuritySchemes
+	agent.CardSignatureVerified = descriptor.CardSignatureVerified
+	agent.CardSignatureKeyID = descriptor.CardSignatureKeyID
 	agent.Skills = descriptor.Skills
 	agent.HealthStatus = core.AgentHealthHealthy
 	agent.HealthMessage = ""
@@ -165,8 +168,13 @@ func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, 
 	if policy.RequiredProtocolBinding != "" && descriptor.ProtocolBinding != policy.RequiredProtocolBinding {
 		return core.Agent{}, fmt.Errorf("remote Agent protocol binding %q does not match required %q", descriptor.ProtocolBinding, policy.RequiredProtocolBinding)
 	}
-	if policy.RequiredStreamTransport != "" && policy.RequiredStreamTransport != "SSE" {
-		return core.Agent{}, fmt.Errorf("unsupported required stream transport %q", policy.RequiredStreamTransport)
+	if policy.RequiredStreamTransport != "" {
+		stream := strings.ToUpper(strings.TrimSpace(policy.RequiredStreamTransport))
+		binding := strings.ToUpper(strings.ReplaceAll(descriptor.ProtocolBinding, "_", ""))
+		if (binding == "GRPC" && stream != "SERVER_STREAMING" && stream != "GRPC") ||
+			(binding != "GRPC" && stream != "SSE") {
+			return core.Agent{}, fmt.Errorf("unsupported required stream transport %q for binding %q", policy.RequiredStreamTransport, descriptor.ProtocolBinding)
+		}
 	}
 	if policy.RequireStreaming && !descriptor.Streaming {
 		return core.Agent{}, errors.New("remote Agent does not declare streaming support")
@@ -177,7 +185,10 @@ func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, 
 	if missing := missingSkills(policy.RequiredSkills, descriptor.Skills); len(missing) > 0 {
 		return core.Agent{}, fmt.Errorf("remote Agent does not declare required skills: %s", strings.Join(missing, ", "))
 	}
-	if err := validateHTTPURL(descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
+	if disallowed := disallowedSkills(policy.AllowedSkills, descriptor.Skills); len(disallowed) > 0 {
+		return core.Agent{}, fmt.Errorf("remote Agent declares skills outside the allowed policy: %s", strings.Join(disallowed, ", "))
+	}
+	if err := validateAgentEndpoint(descriptor.ProtocolBinding, descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
 		return core.Agent{}, fmt.Errorf("Agent endpoint URL: %w", err)
 	}
 	declared := make(map[string]struct{}, len(descriptor.SecuritySchemes))
@@ -208,7 +219,8 @@ func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, 
 		ProtocolBinding: descriptor.ProtocolBinding, ProtocolVersion: descriptor.ProtocolVersion,
 		Endpoint: descriptor.Endpoint, Streaming: descriptor.Streaming,
 		PushNotifications: descriptor.PushNotifications,
-		SecuritySchemes:   descriptor.SecuritySchemes, Skills: descriptor.Skills,
+		SecuritySchemes:   descriptor.SecuritySchemes, CardSignatureVerified: descriptor.CardSignatureVerified,
+		CardSignatureKeyID: descriptor.CardSignatureKeyID, Skills: descriptor.Skills,
 		CredentialEnv:     credentialEnv,
 		HealthStatus:      core.AgentHealthHealthy,
 		LastHealthCheckAt: &now,
@@ -232,6 +244,23 @@ func missingSkills(required, declared []string) []string {
 		}
 	}
 	return missing
+}
+
+func disallowedSkills(allowed, declared []string) []string {
+	if len(allowed) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(allowed))
+	for _, skill := range allowed {
+		set[skill] = struct{}{}
+	}
+	var result []string
+	for _, skill := range declared {
+		if _, ok := set[skill]; !ok {
+			result = append(result, skill)
+		}
+	}
+	return result
 }
 
 func (s *Service) ListAgents(ctx context.Context, tenantID string) ([]core.Agent, error) {
@@ -284,7 +313,10 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 		if !agent.PushNotifications {
 			return core.Task{}, errors.New("remote Agent does not declare Push support")
 		}
-		if err := validateHTTPURL(s.PublicBaseURL, true); err != nil {
+		// Local fixtures may use loopback HTTP only when the explicit private-URL
+		// development switch is enabled; all non-development callbacks remain
+		// constrained to public HTTPS endpoints.
+		if err := validateHTTPURL(s.PublicBaseURL, !s.AllowPrivateAgentURLs); err != nil {
 			return core.Task{}, fmt.Errorf("public callback base URL: %w", err)
 		}
 		token, tokenErr := s.token()
@@ -504,7 +536,8 @@ func (s *Service) AcceptPush(ctx context.Context, tenantID, taskID, token string
 	if task.PushTokenHash == "" || subtle.ConstantTimeCompare(want, got) != 1 {
 		return core.Task{}, ErrInvalidPushCredential
 	}
-	if observation.RemoteTaskID == "" || observation.RemoteTaskID != task.RemoteTaskID {
+	if observation.RemoteTaskID == "" ||
+		(task.RemoteTaskID != "" && observation.RemoteTaskID != task.RemoteTaskID) {
 		return core.Task{}, ErrPushTaskMismatch
 	}
 	observation.Source = "a2a-push"
@@ -539,7 +572,8 @@ func (s *Service) ApplyInboxItem(ctx context.Context, item core.InboxItem) (core
 	if err != nil {
 		return core.Task{}, err
 	}
-	if observation.RemoteTaskID == "" || observation.RemoteTaskID != task.RemoteTaskID {
+	if observation.RemoteTaskID == "" ||
+		(task.RemoteTaskID != "" && observation.RemoteTaskID != task.RemoteTaskID) {
 		return core.Task{}, ErrPushTaskMismatch
 	}
 	observation.Source = "a2a-push"
