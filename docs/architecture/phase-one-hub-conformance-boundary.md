@@ -12,6 +12,7 @@ around a provider-opaque federation service:
 ```text
 POST /v1/agents
 GET  /v1/agents
+POST /v1/agents/{id}/refresh
 POST /v1/tasks
 GET  /v1/tasks/{id}
 GET  /v1/tasks/{id}/events
@@ -41,6 +42,13 @@ updated local snapshot. Continuation is tenant-scoped and rejected with `409`
 unless the Task is currently `INPUT_REQUIRED`; it never creates a replacement
 Task or exposes provider-private workflow state.
 
+Task submission may select an Agent explicitly with `agentId` or request a
+declared capability with `skill`. Skill routing is tenant-scoped, deterministic
+by registry order, and excludes registrations marked `UNHEALTHY`. The refresh
+endpoint re-resolves the public AgentCard, updates endpoint/capability data,
+and records the last health result; a failed discovery marks the registration
+unhealthy until a later refresh succeeds.
+
 ## Boundary Matrix
 
 | Area | Current executable evidence | Not yet claimed |
@@ -53,8 +61,8 @@ Task or exposes provider-private workflow state.
 | Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack, HTTPS/DNS/IP policy, authenticated rate limiting and audit | Replay timestamp/signature, dead-letter policy, HA ingress load test |
 | Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics; filesystem/S3 object storage, MIME/size/quota controls, ClamAV quarantine, authenticated retrieval, expiry leases | Encryption policy, DLP/legal hold, backup/restore, production throughput |
 | Errors | Sanitized transport/auth/authz/validation/resource/state/protocol categories | Complete binding-specific status equivalence and tenant policy details |
-| Registry | Durable built-in Agent Card registration by URL | Nacos/ARD adapter, Card signature verification, refresh and health policy |
-| Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance | Priority, preemption, operator pause/drain, dead-letter administration |
+| Registry | Durable built-in Agent Card registration by URL, skill selection, explicit Card refresh and health status | Nacos/ARD adapter, Card signature verification, scheduled refresh policy and external registry health |
+| Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance; durable Outbox worker | Priority, preemption, operator pause/drain, production event-bus operations and dead-letter administration |
 | Gateway | Direct A2A calls behind the federation Adapter interface | Managed agentgateway route, policy routing, rate limiting, egress controls |
 | AAMP | AAMP 1.1 lifecycle/result/attachment mapper into the common model | SMTP/JMAP client, discovery, sender policy, pairing, mailbox credentials |
 
@@ -94,12 +102,11 @@ records the selected protocol source, SDK, Binding, and the exact TCK revision
 previously evaluated. A deterministic Go test verifies that these pins and their
 evidence status do not drift silently.
 
-The external TCK remains `unresolved-revision-skew`, not passed. The
-repository-owned JSON-RPC/SSE SUT run at the pinned TCK revision exited
-successfully with 81 passed, 154 skipped, and 30 deselected pytest cases; its
-compatibility registry records 67 PASS, 25 SKIPPED, and 37 NOT TESTED
-requirements. The remaining untested bindings and
-authentication/Push/revision waivers are machine-recorded; full conformance
+The external TCK remains `unresolved-revision-skew`, not passed. At the pinned
+checkout, the repository-owned SUT exited successfully for JSON-RPC (`81
+passed, 154 skipped, 30 deselected`) and HTTP+JSON (`73 passed, 162 skipped,
+30 deselected`). The compatibility registry still records skipped gRPC,
+authentication, Push, and revision-skew requirements; full conformance
 requires an aligned TCK and closure or explanation of every remaining MUST
 failure.
 
@@ -120,6 +127,20 @@ observable working, input-required, and terminal states; body, structured result
 and attachments become Artifact Parts. The AAMP mailbox thread remains its
 authoritative asynchronous control plane. It does not become an in-domain Agent
 orchestration runtime, and no SMTP/JMAP compatibility claim is made yet.
+
+## Event Publication and Trust Evidence
+
+The durable Outbox can publish to a configured HTTPS collector or to a local
+0600 JSONL sink through `--outbox-file`; both use stable tenant/deduplication
+keys and at-least-once retry semantics. The local sink is an operator-visible
+development integration, not a claim that a production event bus has been
+qualified.
+
+The opt-in trust integration test exercises OIDC discovery and JWKS rotation,
+JWT revocation, HTTPS policy decisions, rate limiting, durable audit, and
+SPIFFE-mapped mTLS using generated local certificates. It is evidence for the
+interfaces and failure behavior only; partner IdP/CA/PDP deployment, rotation
+operations, and outage drills remain external qualification work.
 
 ## External Provider Readiness Note
 

@@ -76,6 +76,7 @@ func main() {
 	auditURL := flag.String("audit-url", "", "optional HTTPS central audit collector endpoint")
 	auditTokenReference := flag.String("audit-token-ref", "", "optional SecretProvider reference for the central audit collector")
 	outboxURL := flag.String("outbox-url", "", "optional HTTPS endpoint for durable Task Event outbox delivery")
+	outboxFile := flag.String("outbox-file", "", "optional 0600 JSONL file for local durable Task Event outbox delivery")
 	outboxTokenReference := flag.String("outbox-token-ref", "", "optional SecretProvider reference for the outbox endpoint Bearer token")
 	outboxMaxAttempts := flag.Uint("outbox-max-attempts", 12, "maximum Outbox delivery attempts before dead-lettering; zero means unlimited")
 	workerDrainTimeout := flag.Duration("worker-drain-timeout", 15*time.Second, "maximum time allowed for background workers to drain during shutdown")
@@ -95,6 +96,9 @@ func main() {
 	if *outboxTokenReference != "" && *outboxURL == "" {
 		log.Fatal("--outbox-token-ref requires --outbox-url")
 	}
+	if *outboxURL != "" && *outboxFile != "" {
+		log.Fatal("--outbox-url and --outbox-file are mutually exclusive")
+	}
 	var outboxPublisher worker.OutboxPublisher
 	outboxMetrics := &worker.OutboxMetrics{}
 	if *outboxURL != "" {
@@ -112,6 +116,14 @@ func main() {
 			log.Fatalf("outbox publisher: %v", publisherErr)
 		}
 		publisher.Client = &http.Client{Timeout: 10 * time.Second}
+		outboxPublisher = publisher
+	}
+	if *outboxFile != "" {
+		publisher, publisherErr := worker.NewFileOutboxPublisher(*outboxFile)
+		if publisherErr != nil {
+			log.Fatalf("outbox file publisher: %v", publisherErr)
+		}
+		defer publisher.Close()
 		outboxPublisher = publisher
 	}
 	artifactMetadata, ok := store.(core.ArtifactMetadataStore)

@@ -48,9 +48,89 @@ type AgentRegistrationPolicy struct {
 }
 
 type SubmitTaskInput struct {
-	AgentID    string `json:"agentId"`
+	AgentID    string `json:"agentId,omitempty"`
+	Skill      string `json:"skill,omitempty"`
 	Text       string `json:"text"`
 	EnablePush bool   `json:"enablePush,omitempty"`
+}
+
+// ResolveAgent keeps explicit agentId calls compatible while allowing callers
+// to route by an AgentCard-declared skill within their tenant.
+func (s *Service) ResolveAgent(ctx context.Context, tenantID, agentID, skill string) (core.Agent, error) {
+	if strings.TrimSpace(agentID) != "" {
+		agent, err := s.Store.GetAgent(ctx, tenantID, agentID)
+		if err != nil {
+			return core.Agent{}, err
+		}
+		if strings.TrimSpace(skill) != "" && !hasSkill(agent, skill) {
+			return core.Agent{}, fmt.Errorf("Agent %q does not declare skill %q", agentID, skill)
+		}
+		if agent.HealthStatus == core.AgentHealthUnhealthy {
+			return core.Agent{}, fmt.Errorf("Agent %q is unhealthy: %s", agentID, agent.HealthMessage)
+		}
+		return agent, nil
+	}
+	if strings.TrimSpace(skill) == "" {
+		return core.Agent{}, errors.New("agent ID or skill is required")
+	}
+	agents, err := s.Store.ListAgents(ctx, tenantID)
+	if err != nil {
+		return core.Agent{}, err
+	}
+	for _, agent := range agents {
+		if agent.HealthStatus != core.AgentHealthUnhealthy && hasSkill(agent, skill) {
+			return agent, nil
+		}
+	}
+	return core.Agent{}, fmt.Errorf("no healthy Agent declares skill %q", skill)
+}
+
+func hasSkill(agent core.Agent, skill string) bool {
+	for _, declared := range agent.Skills {
+		if declared == skill {
+			return true
+		}
+	}
+	return false
+}
+
+// RefreshAgent re-resolves the public AgentCard and persists its current
+// endpoint/capabilities. A failed refresh marks the registration unhealthy.
+func (s *Service) RefreshAgent(ctx context.Context, tenantID, agentID string) (core.Agent, error) {
+	agent, err := s.Store.GetAgent(ctx, tenantID, agentID)
+	if err != nil {
+		return core.Agent{}, err
+	}
+	now := s.now()
+	descriptor, discoverErr := s.Adapter.Discover(ctx, agent.CardURL)
+	if discoverErr != nil {
+		agent.HealthStatus = core.AgentHealthUnhealthy
+		agent.HealthMessage = discoverErr.Error()
+		agent.LastHealthCheckAt = &now
+		agent.UpdatedAt = now
+		_ = s.Store.PutAgent(ctx, agent)
+		return agent, discoverErr
+	}
+	if err := validateHTTPURL(descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
+		return agent, fmt.Errorf("Agent endpoint URL: %w", err)
+	}
+	agent.Name = descriptor.Name
+	agent.ProviderVersion = descriptor.ProviderVersion
+	agent.ProtocolBinding = descriptor.ProtocolBinding
+	agent.ProtocolVersion = descriptor.ProtocolVersion
+	agent.Endpoint = descriptor.Endpoint
+	agent.Streaming = descriptor.Streaming
+	agent.PushNotifications = descriptor.PushNotifications
+	agent.SecuritySchemes = descriptor.SecuritySchemes
+	agent.Skills = descriptor.Skills
+	agent.HealthStatus = core.AgentHealthHealthy
+	agent.HealthMessage = ""
+	agent.LastHealthCheckAt = &now
+	agent.UpdatedAt = now
+	if err := s.Store.PutAgent(ctx, agent); err != nil {
+		return core.Agent{}, err
+	}
+	return agent, nil
 }
 
 type ContinueTaskInput struct {
@@ -129,8 +209,10 @@ func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, 
 		Endpoint: descriptor.Endpoint, Streaming: descriptor.Streaming,
 		PushNotifications: descriptor.PushNotifications,
 		SecuritySchemes:   descriptor.SecuritySchemes, Skills: descriptor.Skills,
-		CredentialEnv: credentialEnv,
-		CreatedAt:     now, UpdatedAt: now,
+		CredentialEnv:     credentialEnv,
+		HealthStatus:      core.AgentHealthHealthy,
+		LastHealthCheckAt: &now,
+		CreatedAt:         now, UpdatedAt: now,
 	}
 	if err := s.Store.PutAgent(ctx, agent); err != nil {
 		return core.Agent{}, err
@@ -186,7 +268,7 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 	if strings.TrimSpace(input.Text) == "" {
 		return core.Task{}, errors.New("task text is required")
 	}
-	agent, err := s.Store.GetAgent(ctx, tenantID, input.AgentID)
+	agent, err := s.ResolveAgent(ctx, tenantID, input.AgentID, input.Skill)
 	if err != nil {
 		return core.Task{}, err
 	}

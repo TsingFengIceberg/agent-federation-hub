@@ -48,11 +48,13 @@ agent_config.yaml
     -> A2A Task submission and reconciliation
 ```
 
-The first implementation loads once during process startup. It does not hot
-reload or overwrite an existing registry record during runtime. Use an explicit
-restart or the authenticated Agent management API for later changes. A future
-configuration controller may add reconciliation, but must preserve the same
-AgentCard authority and tenant/credential boundaries.
+The configuration file still loads once during process startup. The authenticated
+`POST /v1/agents/{id}/refresh` operation provides explicit runtime Card refresh
+and health marking without changing the operator-owned credential references.
+Task callers may use `skill` instead of `agentId`; the Hub chooses a healthy
+tenant-local registration whose Card declares that skill. A future scheduled
+controller may add automatic refresh, but must preserve the same AgentCard
+authority and tenant/credential boundaries.
 
 ## Local Setup
 

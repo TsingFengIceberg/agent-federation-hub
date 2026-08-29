@@ -5,12 +5,47 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 )
+
+func TestFileOutboxPublisherIsDurableAndIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events", "outbox.jsonl")
+	item := core.OutboxItem{ID: "outbox-1", TenantID: "tenant-a", TaskID: "task-1", DedupKey: "event-1", Topic: "task.status", Payload: json.RawMessage(`{"state":"WORKING"}`), CreatedAt: time.Now().UTC()}
+	publisher, err := NewFileOutboxPublisher(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Publish(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Publish(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewFileOutboxPublisher(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.Publish(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(contents)), "\n") + 1; lines != 1 {
+		t.Fatalf("expected one durable line, got %d: %s", lines, contents)
+	}
+}
 
 func TestHTTPOutboxPublisherSendsIdempotentEnvelope(t *testing.T) {
 	var request *http.Request

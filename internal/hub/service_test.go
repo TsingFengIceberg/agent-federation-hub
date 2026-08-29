@@ -20,6 +20,7 @@ import (
 
 type fakeAdapter struct {
 	descriptor     federation.Descriptor
+	discover       func(context.Context, string) (federation.Descriptor, error)
 	send           func(context.Context, core.Agent, federation.Message) iter.Seq2[federation.Observation, error]
 	get            func(context.Context, core.Agent, string) (federation.Observation, error)
 	cancel         func(context.Context, core.Agent, string) (federation.Observation, error)
@@ -30,7 +31,10 @@ type fakeAdapter struct {
 	lastMessage    federation.Message
 }
 
-func (f *fakeAdapter) Discover(context.Context, string) (federation.Descriptor, error) {
+func (f *fakeAdapter) Discover(ctx context.Context, cardURL string) (federation.Descriptor, error) {
+	if f.discover != nil {
+		return f.discover(ctx, cardURL)
+	}
 	descriptor := f.descriptor
 	if descriptor.Endpoint == "" {
 		descriptor.Endpoint = "https://agent.example/a2a"
@@ -137,6 +141,41 @@ func TestRegisterAgentWithPolicyChecksDiscoveredCard(t *testing.T) {
 		ID: "agent-missing-skill", CardURL: "https://agent.example/card.json",
 	}, AgentRegistrationPolicy{RequiredSkills: []string{"finance"}}); err == nil {
 		t.Fatal("missing required skill was accepted")
+	}
+}
+
+func TestResolveAgentBySkillAndRefreshHealth(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	adapter := &fakeAdapter{descriptor: federation.Descriptor{
+		Name: "research", ProviderVersion: "2", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0",
+		Endpoint: "https://agent.example/v2", Skills: []string{"research"}, Streaming: true,
+	}}
+	service := newTestService(t, store, adapter)
+	registerTestAgent(t, service, "tenant-a")
+
+	selected, err := service.ResolveAgent(context.Background(), "tenant-a", "", "research")
+	if err != nil || selected.ID != "agent-1" {
+		t.Fatalf("selected=%+v err=%v", selected, err)
+	}
+	task, err := service.SubmitTask(context.Background(), "tenant-a", SubmitTaskInput{Skill: "research", Text: "work"})
+	if err != nil || task.AgentID != "agent-1" {
+		t.Fatalf("skill-routed task=%+v err=%v", task, err)
+	}
+
+	refreshed, err := service.RefreshAgent(context.Background(), "tenant-a", "agent-1")
+	if err != nil || refreshed.HealthStatus != core.AgentHealthHealthy || refreshed.Endpoint != "https://agent.example/v2" {
+		t.Fatalf("refreshed=%+v err=%v", refreshed, err)
+	}
+	adapter.discover = func(context.Context, string) (federation.Descriptor, error) {
+		return federation.Descriptor{}, errors.New("provider unavailable")
+	}
+	unhealthy, err := service.RefreshAgent(context.Background(), "tenant-a", "agent-1")
+	if err == nil || unhealthy.HealthStatus != core.AgentHealthUnhealthy {
+		t.Fatalf("failed refresh status=%+v err=%v", unhealthy, err)
+	}
+	if _, err := service.ResolveAgent(context.Background(), "tenant-a", "", "research"); err == nil {
+		t.Fatal("unhealthy Agent remained eligible for skill routing")
 	}
 }
 

@@ -87,9 +87,18 @@ type Agent struct {
 	SecuritySchemes   []string          `json:"securitySchemes,omitempty"`
 	Skills            []string          `json:"skills,omitempty"`
 	CredentialEnv     map[string]string `json:"credentialEnv,omitempty"`
+	HealthStatus      string            `json:"healthStatus,omitempty"`
+	HealthMessage     string            `json:"healthMessage,omitempty"`
+	LastHealthCheckAt *time.Time        `json:"lastHealthCheckAt,omitempty"`
 	CreatedAt         time.Time         `json:"createdAt"`
 	UpdatedAt         time.Time         `json:"updatedAt"`
 }
+
+const (
+	AgentHealthUnknown   = "UNKNOWN"
+	AgentHealthHealthy   = "HEALTHY"
+	AgentHealthUnhealthy = "UNHEALTHY"
+)
 
 func CloneAgent(agent Agent) (Agent, error) {
 	encoded, err := json.Marshal(agent)

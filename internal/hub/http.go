@@ -71,6 +71,7 @@ func (h *HTTPHandler) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/agents", h.protected(access.ActionAgentRegister, h.registerAgent))
 	mux.HandleFunc("GET /v1/agents", h.protected(access.ActionAgentList, h.listAgents))
+	mux.HandleFunc("POST /v1/agents/{agentID}/refresh", h.protected(access.ActionAgentRefresh, h.refreshAgent))
 	mux.HandleFunc("POST /v1/tasks", h.protected(access.ActionTaskSubmit, h.submitTask))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/messages", h.protected(access.ActionTaskContinue, h.continueTask))
 	mux.HandleFunc("GET /v1/tasks/{taskID}", h.protected(access.ActionTaskRead, h.getTask))
@@ -168,6 +169,9 @@ func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) htt
 		if resourceID == "" {
 			resourceID = r.PathValue("artifactID")
 		}
+		if resourceID == "" {
+			resourceID = r.PathValue("agentID")
+		}
 		if h.Limiter != nil {
 			retryAfter, allowed := h.Limiter.Allow(r.Context(), principal, access.Request{Action: action, ResourceID: resourceID})
 			if !allowed {
@@ -229,7 +233,29 @@ func (h *HTTPHandler) listAgents(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, err)
 		return
 	}
+	if skill := strings.TrimSpace(r.URL.Query().Get("skill")); skill != "" {
+		filtered := agents[:0]
+		for _, agent := range agents {
+			if hasSkill(agent, skill) {
+				filtered = append(filtered, agent)
+			}
+		}
+		agents = filtered
+	}
 	writeJSON(w, http.StatusOK, agents)
+}
+
+func (h *HTTPHandler) refreshAgent(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	agent, err := h.Service.RefreshAgent(r.Context(), tenantID, r.PathValue("agentID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 func (h *HTTPHandler) submitTask(w http.ResponseWriter, r *http.Request) {

@@ -48,6 +48,7 @@ type Action string
 const (
 	ActionAgentRegister  Action = "agent.register"
 	ActionAgentList      Action = "agent.list"
+	ActionAgentRefresh   Action = "agent.refresh"
 	ActionTaskSubmit     Action = "task.submit"
 	ActionTaskContinue   Action = "task.continue"
 	ActionTaskRead       Action = "task.read"
@@ -76,6 +77,7 @@ func DefaultScopeAuthorizer() *ScopeAuthorizer {
 	return &ScopeAuthorizer{Required: map[Action]string{
 		ActionAgentRegister:  "agents:write",
 		ActionAgentList:      "agents:read",
+		ActionAgentRefresh:   "agents:write",
 		ActionTaskSubmit:     "tasks:submit",
 		ActionTaskContinue:   "tasks:continue",
 		ActionTaskRead:       "tasks:read",

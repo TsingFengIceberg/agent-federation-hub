@@ -156,6 +156,29 @@ func TestHTTPTaskContinuationPreservesRemoteCorrelation(t *testing.T) {
 	}
 }
 
+func TestHTTPAgentSkillFilterAndRefresh(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	adapter := &fakeAdapter{descriptor: federation.Descriptor{
+		Name: "research", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0",
+		Endpoint: "https://agent.example/a2a", Skills: []string{"research"},
+	}}
+	service := newTestService(t, store, adapter)
+	handler := testHTTPHandler(service, nil, 0)
+	response := request(t, handler, http.MethodPost, "/v1/agents", `{"id":"agent-1","cardUrl":"https://agent.example/card.json"}`, "tenant-a", nil)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/v1/agents?skill=research", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"agent-1"`) {
+		t.Fatalf("skill filter status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/agents/agent-1/refresh", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"healthStatus":"HEALTHY"`) {
+		t.Fatalf("refresh status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestHTTPPushSecurityAndSizeLimit(t *testing.T) {
 	store, _ := core.OpenJournal("")
 	defer store.Close()

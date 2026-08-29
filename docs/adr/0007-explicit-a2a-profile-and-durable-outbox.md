@@ -41,6 +41,11 @@ replaceable idempotent publisher, and acknowledges only after publication.
 Failures are rescheduled with bounded backoff. The delivery guarantee is
 at-least-once; exactly-once external side effects are not claimed.
 
+The executable Hub accepts either an HTTPS collector (`--outbox-url`) or a
+0600 append-only JSONL development sink (`--outbox-file`). The latter is useful
+for local inspection and restart tests; a managed event bus remains an
+operator integration rather than a built-in dependency.
+
 PostgreSQL schema migration `003_outbox.sql` adds the queue and its pending
 index. The migration runner records SHA-256 checksums in
 `afh_schema_migrations`, serializes concurrent migration attempts with a
@@ -54,8 +59,8 @@ transaction advisory lock, and fails if an applied migration is modified.
   publish/acknowledgement crash window.
 - The Journal remains useful for local development, but PostgreSQL plus an
   external object store remains the production deployment direction.
-- Outbox retention, dead-letter administration, metrics, and a concrete event
-  bus or central audit sink are still operational work, not solved by this ADR.
+- Outbox retention, dead-letter administration, and managed event-bus operations
+  are still operational work, not solved by this ADR.
 
 ## Verification
 
