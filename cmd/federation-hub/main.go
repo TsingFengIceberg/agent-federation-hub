@@ -49,6 +49,8 @@ func main() {
 	jwtKeyID := flag.String("jwt-key-id", "", "required JWT kid mapped to the configured static public key")
 	workloadIdentitiesFile := flag.String("workload-identities-file", "", "JSON mapping from SPIFFE workload IDs to tenant Principals")
 	tenantTrustFile := flag.String("tenant-trust-file", "", "versioned JSON issuer-to-tenant trust policy")
+	trustBundleFile := flag.String("trust-bundle-file", "", "versioned JSON OIDC issuer and SPIFFE workload trust bundle")
+	trustBundleReloadInterval := flag.Duration("trust-bundle-reload-interval", 0, "optional interval for reloading the trust bundle; zero disables")
 	accessPolicyFile := flag.String("access-policy-file", "", "versioned JSON local role and action authorization policy")
 	tlsCertificateFile := flag.String("tls-cert-file", "", "PEM server certificate file")
 	tlsKeyFile := flag.String("tls-key-file", "", "PEM server private key file")
@@ -448,14 +450,26 @@ func main() {
 	if !ok {
 		log.Fatal("configured Store does not implement token revocation")
 	}
+	var trustBundleManager *hub.TrustBundleManager
+	if *trustBundleFile != "" {
+		if *tenantTrustFile != "" || *workloadIdentitiesFile != "" {
+			log.Fatal("--trust-bundle-file cannot be combined with --tenant-trust-file or --workload-identities-file")
+		}
+		trustBundleManager, err = hub.NewTrustBundleManager(*trustBundleFile)
+		if err != nil {
+			log.Fatalf("trust bundle: %v", err)
+		}
+		log.Printf("loaded trust bundle generation %d from %s", trustBundleManagerGeneration(trustBundleManager), *trustBundleFile)
+	}
 	security := securityOptions{
 		AuthMode: *authMode, Issuer: *jwtIssuer, Audience: *jwtAudience,
 		PublicKeyFile: *jwtPublicKeyFile, KeyID: *jwtKeyID,
 		WorkloadIdentityFile: *workloadIdentitiesFile,
 		PolicyURL:            *policyURL, PolicyTokenReference: *policyTokenReference,
 		TokenProfilesFile: *tokenProfilesFile, TLSClientCAFile: *tlsClientCAFile,
-		TenantTrustFile: *tenantTrustFile, RequireTenantTrust: *authMode != "development",
-		AccessPolicyFile: *accessPolicyFile,
+		TenantTrustFile: *tenantTrustFile, TrustBundleFile: *trustBundleFile, TrustBundle: trustBundleManager,
+		RequireTenantTrust: *authMode != "development",
+		AccessPolicyFile:   *accessPolicyFile,
 	}
 	authenticator, err := buildAuthenticator(context.Background(), security, revocations)
 	if err != nil {
@@ -482,6 +496,11 @@ func main() {
 		}
 		if err := healthStore.Health(ctx); err != nil {
 			return err
+		}
+		if trustBundleManager != nil {
+			if err := trustBundleManager.ValidateCurrent(); err != nil {
+				return fmt.Errorf("trust bundle is not ready: %w", err)
+			}
 		}
 		if objectHealth, ok := artifacts.Objects.(artifactstore.HealthStore); ok {
 			if err := objectHealth.Health(ctx); err != nil {
@@ -519,6 +538,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if trustBundleManager != nil && *trustBundleReloadInterval > 0 {
+		go trustBundleManager.Watch(ctx, *trustBundleReloadInterval, func(reloadErr error) {
+			log.Printf("trust bundle reload failed; retaining last valid snapshot: %v", reloadErr)
+		})
+	}
 	resolvedWorkerID := *workerID
 	if resolvedWorkerID == "" {
 		resolvedWorkerID = "hub-" + core.NewID()
@@ -755,6 +779,17 @@ func parseAllowlist(value string) map[string]struct{} {
 		}
 	}
 	return result
+}
+
+func trustBundleManagerGeneration(manager *hub.TrustBundleManager) uint64 {
+	if manager == nil {
+		return 0
+	}
+	generation, ok := manager.Generation()
+	if !ok {
+		return 0
+	}
+	return generation
 }
 
 func buildGRPCDialOptions(caFile, serverName string) ([]grpc.DialOption, error) {

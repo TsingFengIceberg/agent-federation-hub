@@ -5,6 +5,7 @@ model_config.yaml
 agent_config.yaml
 access_policy.json
 tenant_trust.json
+trust_bundle.json
 .venv/
 venv/
 __pycache__/

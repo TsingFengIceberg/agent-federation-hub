@@ -1,9 +1,10 @@
 # Production Control Plane and Trust Boundary
 
 > Evidence status: `verified` for repository-owned interfaces, local TLS
-> fixtures, deterministic retry/circuit tests, strict policy parsing, and
-> local trust integration. External Registry/Gateway, IdP, CA, PDP, and
-> managed audit services remain `planned` qualification targets.
+> fixtures, deterministic retry/circuit tests, strict policy parsing, unified
+> Trust Bundle parser/reload tests, and local trust integration. External
+> Registry/Gateway, IdP, CA, PDP, and managed audit services remain `planned`
+> qualification targets.
 
 This document records the first production-shaped boundary for the Hub. It is
 not a claim that a particular Registry, Gateway, identity provider, or policy
@@ -58,15 +59,19 @@ multi-region routing, policy authoring, or production SLO evidence.
 Non-development startup requires all of the following:
 
 - an inbound OIDC/JWT or verified SPIFFE mTLS mode;
-- `tenant_trust.json` (or an equivalent operator path) binding each accepted
-  issuer to explicit tenant IDs and optional trust scopes;
+- `trust_bundle.json` (or the compatible legacy trust files) binding each
+  accepted issuer and SPIFFE workload to explicit tenants and optional trust
+  scopes;
 - `access_policy.json` (or an equivalent operator path) defining versioned
   role-to-scope and action requirements;
 - PostgreSQL-backed request rate limiting;
 - a `0600` local audit file; a central HTTPS exporter is optional but should be
   paired with the local sink.
 
-`TenantTrustDocument` prevents a valid token from a trusted issuer from
+`TrustBundle` is the preferred unified snapshot. It is not an IdP, CA, or PDP;
+it binds identities after cryptographic authentication and is distributed by
+an operator-controlled channel. `TenantTrustDocument` remains a compatible
+legacy issuer-only input. Both prevent a valid token from a trusted issuer from
 asserting an arbitrary tenant. `PolicyDocument` preserves the default action
 contract while allowing operator-controlled role scopes and tenant-specific
 action requirements. An external HTTPS PDP remains an additional fail-closed
@@ -80,11 +85,20 @@ forensic logging service.
 
 ## Operator examples
 
-The committed templates are [`access_policy.example.json`](../../access_policy.example.json)
-and [`tenant_trust.example.json`](../../tenant_trust.example.json). A
+The committed templates are [`access_policy.example.json`](../../access_policy.example.json),
+[`tenant_trust.example.json`](../../tenant_trust.example.json), and
+[`trust_bundle.example.json`](../../trust_bundle.example.json). The unified
+bundle format is specified in
+[`trust-bundle-contract.md`](../specifications/trust-bundle-contract.md). A
 non-development process must additionally configure the existing TLS, issuer,
 audience, rate-limit, artifact scanner, and audit flags documented in the
 [phase-one boundary](phase-one-hub-conformance-boundary.md).
+
+Use `--trust-bundle-file` to select the unified path and optionally
+`--trust-bundle-reload-interval` for bounded polling. It cannot be combined
+with `--tenant-trust-file` or `--workload-identities-file`. For mTLS, the
+bundle maps verified SPIFFE URI SANs, while `--tls-client-ca-file` still
+controls certificate-chain verification.
 
 Control-plane client credentials are always SecretProvider references. Literal
 tokens must not appear in YAML, JSON, AgentCards, Tasks, Artifacts, or logs.

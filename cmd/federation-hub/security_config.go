@@ -32,6 +32,8 @@ type securityOptions struct {
 	TokenProfilesFile    string
 	TLSClientCAFile      string
 	TenantTrustFile      string
+	TrustBundleFile      string
+	TrustBundle          *hub.TrustBundleManager
 	RequireTenantTrust   bool
 	AccessPolicyFile     string
 }
@@ -55,7 +57,23 @@ func buildSecretProvider(base secrets.Provider, profileFile string) (secrets.Pro
 
 func buildAuthenticator(_ context.Context, options securityOptions, store core.RevocationStore) (hub.Authenticator, error) {
 	var validator hub.PrincipalValidator
-	if options.TenantTrustFile != "" {
+	if options.TrustBundleFile != "" && (options.TenantTrustFile != "" || options.WorkloadIdentityFile != "") {
+		return nil, errors.New("--trust-bundle-file cannot be combined with --tenant-trust-file or --workload-identities-file")
+	}
+	trustBundle := options.TrustBundle
+	if options.TrustBundleFile != "" && trustBundle == nil {
+		manager, err := hub.NewTrustBundleManager(options.TrustBundleFile)
+		if err != nil {
+			return nil, fmt.Errorf("trust bundle: %w", err)
+		}
+		trustBundle = manager
+	}
+	if trustBundle != nil {
+		if err := trustBundle.ValidateCurrent(); err != nil {
+			return nil, fmt.Errorf("trust bundle: %w", err)
+		}
+		validator = trustBundle
+	} else if options.TenantTrustFile != "" {
 		document, err := hub.LoadTenantTrustFile(options.TenantTrustFile)
 		if err != nil {
 			return nil, err
@@ -72,6 +90,9 @@ func buildAuthenticator(_ context.Context, options securityOptions, store core.R
 		if options.Issuer == "" || options.Audience == "" {
 			return nil, errors.New("OIDC authentication requires --jwt-issuer and --jwt-audience")
 		}
+		if trustBundle != nil && !trustBundle.IssuerConfigured(options.Issuer) {
+			return nil, fmt.Errorf("trust bundle does not configure OIDC issuer %q", options.Issuer)
+		}
 		provider := hub.NewOIDCKeyProvider(options.Issuer, nil)
 		return &hub.JWTAuthenticator{
 			Issuer: options.Issuer, Audience: options.Audience, Keys: provider,
@@ -79,6 +100,15 @@ func buildAuthenticator(_ context.Context, options securityOptions, store core.R
 		}, nil
 	}
 	buildMTLS := func() (hub.Authenticator, error) {
+		if trustBundle != nil {
+			if !trustBundle.HasWorkloads() {
+				return nil, errors.New("mTLS authentication requires workloads in the trust bundle")
+			}
+			if options.TLSClientCAFile == "" {
+				return nil, errors.New("mTLS authentication requires --tls-client-ca-file")
+			}
+			return &hub.MTLSAuthenticator{Resolver: trustBundle, Validator: validator}, nil
+		}
 		if options.WorkloadIdentityFile == "" {
 			return nil, errors.New("mTLS authentication requires --workload-identities-file")
 		}
@@ -119,6 +149,9 @@ func buildAuthenticator(_ context.Context, options securityOptions, store core.R
 	case "jwt", "jwt-static":
 		if options.Issuer == "" || options.Audience == "" || options.PublicKeyFile == "" || options.KeyID == "" {
 			return nil, errors.New("static JWT mode requires issuer, audience, public key file, and key ID")
+		}
+		if trustBundle != nil && !trustBundle.IssuerConfigured(options.Issuer) {
+			return nil, fmt.Errorf("trust bundle does not configure JWT issuer %q", options.Issuer)
 		}
 		encoded, err := os.ReadFile(options.PublicKeyFile)
 		if err != nil {

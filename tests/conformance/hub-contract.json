@@ -1,0 +1,70 @@
+{
+  "contractVersion": "1.0",
+  "status": "accepted-initial",
+  "product": "agent-federation-hub",
+  "defaultProfile": {
+    "protocolVersion": "1.0",
+    "binding": "JSONRPC",
+    "streamTransport": "SSE"
+  },
+  "optInProfiles": [
+    {
+      "protocolVersion": "1.0",
+      "binding": "HTTP+JSON",
+      "streamTransport": "SSE"
+    },
+    {
+      "protocolVersion": "1.0",
+      "binding": "GRPC",
+      "streamTransport": "server-streaming"
+    }
+  ],
+  "providerBoundary": "opaque",
+  "hubOwns": [
+    "agent-admission",
+    "card-snapshot",
+    "routing",
+    "tenant-trust",
+    "authorization",
+    "task-reconciliation",
+    "artifact-metadata",
+    "audit",
+    "recovery"
+  ],
+  "providerOwns": [
+    "execution",
+    "prompts",
+    "models",
+    "tools",
+    "memory",
+    "workflow",
+    "checkpoints"
+  ],
+  "taskStates": [
+    "SUBMITTED",
+    "WORKING",
+    "INPUT_REQUIRED",
+    "AUTH_REQUIRED",
+    "COMPLETED",
+    "FAILED",
+    "CANCELED",
+    "REJECTED",
+    "UNKNOWN"
+  ],
+  "terminalTaskStates": ["COMPLETED", "FAILED", "CANCELED", "REJECTED"],
+  "deliveryStates": ["PENDING", "ACKNOWLEDGED", "AMBIGUOUS"],
+  "authModes": ["oidc", "mtls", "oidc-or-mtls", "jwt-static", "development"],
+  "aampRole": "asynchronous-mailbox-adapter",
+  "managementOperations": [
+    {"action": "agent.register", "method": "POST", "path": "/v1/agents", "scope": "agents:write"},
+    {"action": "agent.list", "method": "GET", "path": "/v1/agents", "scope": "agents:read"},
+    {"action": "agent.refresh", "method": "POST", "path": "/v1/agents/{agentID}/refresh", "scope": "agents:write"},
+    {"action": "task.submit", "method": "POST", "path": "/v1/tasks", "scope": "tasks:submit"},
+    {"action": "task.continue", "method": "POST", "path": "/v1/tasks/{taskID}/messages", "scope": "tasks:continue"},
+    {"action": "task.read", "method": "GET", "path": "/v1/tasks/{taskID}", "scope": "tasks:read"},
+    {"action": "task.events", "method": "GET", "path": "/v1/tasks/{taskID}/events", "scope": "tasks:read"},
+    {"action": "task.cancel", "method": "POST", "path": "/v1/tasks/{taskID}/cancel", "scope": "tasks:cancel"},
+    {"action": "task.reconcile", "method": "POST", "path": "/v1/tasks/{taskID}/reconcile", "scope": "tasks:reconcile"},
+    {"action": "artifact.read", "method": "GET", "path": "/v1/artifacts/{artifactID}", "scope": "artifacts:read"}
+  ]
+}

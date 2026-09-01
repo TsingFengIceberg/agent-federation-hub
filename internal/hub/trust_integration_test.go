@@ -99,6 +99,26 @@ func TestRealTrustBundleWithOIDCMTLSPDPAndOperations(t *testing.T) {
 	provider.URLPolicy = policy
 	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	provider.Now = func() time.Time { return now }
+	bundlePath := filepath.Join(t.TempDir(), "trust_bundle.json")
+	bundle := TrustBundle{
+		Version: 1, Generation: 1, NotBefore: now.Add(-time.Hour), ExpiresAt: now.Add(24 * time.Hour),
+		Issuers: map[string]IssuerTrustProfile{
+			identityServer.URL:         {Tenants: []string{"tenant-a"}},
+			"spiffe://partner.example": {Tenants: []string{"tenant-a"}},
+		},
+	}
+	encodedBundle, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundlePath, encodedBundle, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustBundle, err := NewTrustBundleManager(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustBundle.Now = func() time.Time { return now }
 	store, err := core.OpenJournal("")
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +127,7 @@ func TestRealTrustBundleWithOIDCMTLSPDPAndOperations(t *testing.T) {
 	authenticator := &JWTAuthenticator{
 		Issuer: identityServer.URL, Audience: "hub",
 		Algorithms: []string{"ES256"}, Keys: provider,
-		Revocations: store, RequireTokenID: true, Now: func() time.Time { return now },
+		Revocations: store, RequireTokenID: true, Now: func() time.Time { return now }, Validator: trustBundle,
 	}
 	firstToken := signIntegrationToken(t, privateOne, "key-1", "token-1", identityServer.URL, now)
 	if _, err := authenticateIntegrationToken(authenticator, firstToken); err != nil {
@@ -225,9 +245,28 @@ func testRealMTLSWorkload(t *testing.T) {
 	clientCert := makeSignedCertificate(t, caCert, caKey, x509.ExtKeyUsageClientAuth, []*url.URL{identity}, nil)
 	roots := x509.NewCertPool()
 	roots.AddCert(caCert)
-	workloadAuthenticator := &MTLSAuthenticator{Resolver: StaticWorkloadResolver{Principals: map[string]access.Principal{
-		identity.String(): {Subject: identity.String(), TenantID: "tenant-a", Scopes: []string{"agents:read"}},
-	}}}
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	bundlePath := filepath.Join(t.TempDir(), "mtls-trust-bundle.json")
+	bundle := TrustBundle{
+		Version: 1, Generation: 1, NotBefore: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
+		Issuers: map[string]IssuerTrustProfile{"spiffe://partner.example": {Tenants: []string{"tenant-a"}}},
+		Workloads: map[string]WorkloadTrustProfile{identity.String(): {
+			Subject: identity.String(), TenantID: "tenant-a", Issuer: "spiffe://partner.example", Scopes: []string{"agents:read"},
+		}},
+	}
+	encodedBundle, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundlePath, encodedBundle, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustBundle, err := NewTrustBundleManager(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustBundle.Now = func() time.Time { return now }
+	workloadAuthenticator := &MTLSAuthenticator{Resolver: trustBundle, Validator: trustBundle}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if _, err := workloadAuthenticator.Authenticate(request.Context(), request); err != nil {
 			response.WriteHeader(http.StatusUnauthorized)

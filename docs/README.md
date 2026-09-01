@@ -18,5 +18,6 @@
 | [`adr/0006-artifact-object-data-plane.md`](adr/0006-artifact-object-data-plane.md) | External object storage, content policy, scanning, quota, and lifecycle boundary | accepted / PostgreSQL and MinIO integration-tested |
 | [`specifications/task-event-artifact-contract.md`](specifications/task-event-artifact-contract.md) | Implemented normalized Task, Event, Artifact, tenancy, and recovery contract | verified local implementation |
 | [`specifications/access-control-contract.md`](specifications/access-control-contract.md) | Principal fields and management API Action-to-scope mapping | implemented initial contract |
+| [`specifications/trust-bundle-contract.md`](specifications/trust-bundle-contract.md) | Versioned OIDC/mTLS trust snapshot, reload, rotation, and legacy migration boundary | implemented initial contract / partner qualification open |
 
 The imported research snapshot records its source repository and commit. General protocol corrections belong in the source study repository first; Agent Federation Hub product decisions and implementation contracts belong here.

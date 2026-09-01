@@ -70,6 +70,16 @@ contain decision metadata but exclude credentials and payloads.
   exponential retry; local persistence remains the recovery boundary when the
   collector is unavailable. This is not yet a central SIEM qualification.
 
+## Unified Trust Bundle
+
+The preferred production-shaped configuration is the versioned
+[`Trust Bundle`](trust-bundle-contract.md). It atomically binds exact OIDC
+issuers and SPIFFE workload identities to tenants, scopes, roles, and optional
+delegation metadata, with monotonic generations and bounded validity windows.
+It is an authorization snapshot, not an IdP, CA, or PDP. Legacy issuer and
+workload JSON files remain available for migration but are mutually exclusive
+with the unified file.
+
 ## Current Gates
 
 Production acceptance still requires real partner IdP, CA, and policy-service

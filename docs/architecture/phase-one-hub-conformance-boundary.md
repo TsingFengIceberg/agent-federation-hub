@@ -59,7 +59,7 @@ unhealthy until a later refresh succeeds.
 | A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, opt-in HTTP+JSON and gRPC adapter paths, gRPC Bearer metadata regression, signed-card round-trip, SDK `v2.5.0`, repository-owned three-Binding TCK SUT, and provider-SDK Push sender/Hub receiver smoke | extensions, signed/extended Card policy, production authentication and complete TCK Push coverage |
 | Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event/outbox transactions, revisions, schema checksum ledger, two-pool lease tests, Outbox admin replay/retention | Managed database qualification, HA, encrypted backup/PITR, and cross-region replication |
 | Recovery | Known-ID disconnect uses `GetTask`; unknown-ID send becomes ambiguous | Automated ambiguous-operation resolution or exactly-once execution |
-| Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, local and central audit retry/outage tests | Production partner IdP/CA/PDP rollout, automated key management, consent, and operational SLO qualification |
+| Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, versioned Trust Bundle reload/rollback checks, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, local and central audit retry/outage tests | Production partner IdP/CA/PDP rollout, protected trust-bundle distribution, automated key management, consent, and operational SLO qualification |
 | Tenancy | Authenticated Principal supplies tenant for every management lookup; forged JWT-mode tenant header is ignored | ABAC policy administration, quotas, tenant encryption keys, cross-organization trust federation |
 | Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack, HTTPS/DNS/IP policy, authenticated rate limiting and audit; real Go SDK Push sender smoke covers status and Artifact delivery | Replay timestamp/signature, dead-letter policy, HA ingress load test, and production sender qualification |
 | Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics; filesystem/S3 object storage, MIME/size/quota controls, ClamAV quarantine, authenticated retrieval, expiry leases | Encryption policy, DLP/legal hold, backup/restore, production throughput |
@@ -184,6 +184,14 @@ central audit, bounded exporter retries/outage recovery, and SPIFFE-mapped mTLS
 using generated local certificates. It is repeatable partner-style evidence;
 production IdP/CA/PDP deployment and key-management operations remain external
 qualification work.
+
+The preferred unified trust path is `--trust-bundle-file`, documented in
+[`trust-bundle-contract.md`](../specifications/trust-bundle-contract.md). It
+atomically binds OIDC issuers and SPIFFE workloads to tenants and policy
+inputs, rejects generation rollback, and can be watched with
+`--trust-bundle-reload-interval`. The bundle does not contain CA material;
+verified mTLS still requires `--tls-client-ca-file`. The legacy trust files
+remain migration-compatible but are mutually exclusive with the unified path.
 
 ## External Provider Readiness Note
 

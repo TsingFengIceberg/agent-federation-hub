@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "generation": 1,
+  "notBefore": "2026-01-01T00:00:00Z",
+  "expiresAt": "2027-01-01T00:00:00Z",
+  "issuers": {
+    "https://idp.example.com": {
+      "tenants": ["partner-a", "partner-b"],
+      "requiredScopes": ["hub:invoke"]
+    },
+    "spiffe://partner.example": {
+      "tenants": ["partner-a"],
+      "requiredScopes": []
+    }
+  },
+  "workloads": {
+    "spiffe://partner.example/ns/prod/sa/competitive-analysis": {
+      "subject": "competitive-analysis-agent",
+      "tenantId": "partner-a",
+      "issuer": "spiffe://partner.example",
+      "scopes": ["tasks:submit", "tasks:read"],
+      "roles": ["provider"]
+    }
+  }
+}

@@ -38,6 +38,13 @@ lifetime is bounded. Only secret references are configured; returned tokens are
 short-lived memory cache entries. Revocations are durable in PostgreSQL and
 restart-replayed in the development journal.
 
+Use the versioned [`Trust Bundle`](../specifications/trust-bundle-contract.md)
+as the preferred operator-distributed snapshot for issuer-to-tenant trust and
+SPIFFE workload mappings. It is validated before startup, atomically reloaded
+with a monotonic generation, checked for active validity at authentication
+time, and cannot be combined with the legacy issuer/workload files. The
+snapshot is configuration data, not an IdP, CA, PDP, or secret store.
+
 ## Consequences
 
 - Remote Agents remain opaque. They receive a credential appropriate to their
@@ -45,7 +52,8 @@ restart-replayed in the development journal.
 - OIDC, SPIFFE mapping, policy evaluation, and token exchange remain replaceable
   edges around a protocol-neutral Principal and Action model.
 - Server TLS is mandatory outside development mode. mTLS additionally requires
-  an operator-provided client CA and workload mapping.
+  an operator-provided client CA and either the unified Trust Bundle workload
+  mapping or the compatible legacy mapping file.
 - The implementation does not operate an identity provider, CA, policy authoring
   system, consent service, or credential vault. Non-development startup also
   requires explicit versioned issuer-to-tenant trust and local access-policy
