@@ -3,6 +3,8 @@
 !.env.example
 model_config.yaml
 agent_config.yaml
+access_policy.json
+tenant_trust.json
 .venv/
 venv/
 __pycache__/

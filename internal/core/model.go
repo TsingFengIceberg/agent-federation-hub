@@ -28,6 +28,78 @@ func (s TaskState) Terminal() bool {
 		s == TaskStateCanceled || s == TaskStateRejected
 }
 
+// WorkflowState is the Hub-owned aggregate state for a multi-Provider
+// operation. Provider Tasks remain opaque children of this aggregate.
+type WorkflowState string
+
+const (
+	WorkflowStatePending         WorkflowState = "PENDING"
+	WorkflowStateRunning         WorkflowState = "RUNNING"
+	WorkflowStateWaitingInput    WorkflowState = "WAITING_INPUT"
+	WorkflowStateCompleted       WorkflowState = "COMPLETED"
+	WorkflowStateFailed          WorkflowState = "FAILED"
+	WorkflowStatePartiallyFailed WorkflowState = "PARTIALLY_FAILED"
+	WorkflowStateCompensating    WorkflowState = "COMPENSATING"
+	WorkflowStateCompensated     WorkflowState = "COMPENSATED"
+	WorkflowStateCanceled        WorkflowState = "CANCELED"
+)
+
+func (s WorkflowState) Terminal() bool {
+	return s == WorkflowStateCompleted || s == WorkflowStateFailed ||
+		s == WorkflowStatePartiallyFailed || s == WorkflowStateCompensated ||
+		s == WorkflowStateCanceled
+}
+
+type WorkflowStep struct {
+	ID                  string    `json:"id"`
+	AgentID             string    `json:"agentId"`
+	Skill               string    `json:"skill,omitempty"`
+	TaskID              string    `json:"taskId,omitempty"`
+	State               TaskState `json:"state"`
+	Required            bool      `json:"required"`
+	CompensationText    string    `json:"compensationText,omitempty"`
+	CompensationTaskID  string    `json:"compensationTaskId,omitempty"`
+	CompensationState   TaskState `json:"compensationState,omitempty"`
+	Problem             *Problem  `json:"problem,omitempty"`
+	CompensationProblem *Problem  `json:"compensationProblem,omitempty"`
+}
+
+type Workflow struct {
+	ID           string         `json:"id"`
+	TenantID     string         `json:"tenantId"`
+	Name         string         `json:"name"`
+	State        WorkflowState  `json:"state"`
+	Steps        []WorkflowStep `json:"steps"`
+	CreatedAt    time.Time      `json:"createdAt"`
+	UpdatedAt    time.Time      `json:"updatedAt"`
+	Revision     uint64         `json:"revision"`
+	LastSequence uint64         `json:"lastSequence"`
+}
+
+type WorkflowEvent struct {
+	ID         string        `json:"id"`
+	DedupKey   string        `json:"dedupKey"`
+	WorkflowID string        `json:"workflowId"`
+	TenantID   string        `json:"tenantId"`
+	Sequence   uint64        `json:"sequence"`
+	Type       string        `json:"type"`
+	Source     string        `json:"source"`
+	State      WorkflowState `json:"state,omitempty"`
+	StepID     string        `json:"stepId,omitempty"`
+	Problem    *Problem      `json:"problem,omitempty"`
+	CreatedAt  time.Time     `json:"createdAt"`
+}
+
+func CloneWorkflow(workflow Workflow) (Workflow, error) {
+	encoded, err := json.Marshal(workflow)
+	if err != nil {
+		return Workflow{}, err
+	}
+	var clone Workflow
+	err = json.Unmarshal(encoded, &clone)
+	return clone, err
+}
+
 type DeliveryState string
 
 const (
@@ -89,6 +161,9 @@ type Agent struct {
 	CardSignatureKeyID    string            `json:"cardSignatureKeyId,omitempty"`
 	Skills                []string          `json:"skills,omitempty"`
 	CredentialEnv         map[string]string `json:"credentialEnv,omitempty"`
+	RegistrationSource    string            `json:"registrationSource,omitempty"`
+	RegistryEndpoint      string            `json:"registryEndpoint,omitempty"`
+	LastRegistrySyncAt    *time.Time        `json:"lastRegistrySyncAt,omitempty"`
 	HealthStatus          string            `json:"healthStatus,omitempty"`
 	HealthMessage         string            `json:"healthMessage,omitempty"`
 	LastHealthCheckAt     *time.Time        `json:"lastHealthCheckAt,omitempty"`
@@ -100,6 +175,7 @@ const (
 	AgentHealthUnknown   = "UNKNOWN"
 	AgentHealthHealthy   = "HEALTHY"
 	AgentHealthUnhealthy = "UNHEALTHY"
+	AgentHealthStale     = "STALE"
 )
 
 func CloneAgent(agent Agent) (Agent, error) {

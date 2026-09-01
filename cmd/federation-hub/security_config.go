@@ -31,6 +31,9 @@ type securityOptions struct {
 	PolicyTokenReference string
 	TokenProfilesFile    string
 	TLSClientCAFile      string
+	TenantTrustFile      string
+	RequireTenantTrust   bool
+	AccessPolicyFile     string
 }
 
 func buildSecretProvider(base secrets.Provider, profileFile string) (secrets.Provider, error) {
@@ -51,6 +54,20 @@ func buildSecretProvider(base secrets.Provider, profileFile string) (secrets.Pro
 }
 
 func buildAuthenticator(_ context.Context, options securityOptions, store core.RevocationStore) (hub.Authenticator, error) {
+	var validator hub.PrincipalValidator
+	if options.TenantTrustFile != "" {
+		document, err := hub.LoadTenantTrustFile(options.TenantTrustFile)
+		if err != nil {
+			return nil, err
+		}
+		policy, err := hub.NewTrustPolicy(document)
+		if err != nil {
+			return nil, fmt.Errorf("tenant trust policy: %w", err)
+		}
+		validator = policy
+	} else if options.RequireTenantTrust {
+		return nil, errors.New("non-development authentication requires --tenant-trust-file")
+	}
 	buildOIDC := func() (hub.Authenticator, error) {
 		if options.Issuer == "" || options.Audience == "" {
 			return nil, errors.New("OIDC authentication requires --jwt-issuer and --jwt-audience")
@@ -58,7 +75,7 @@ func buildAuthenticator(_ context.Context, options securityOptions, store core.R
 		provider := hub.NewOIDCKeyProvider(options.Issuer, nil)
 		return &hub.JWTAuthenticator{
 			Issuer: options.Issuer, Audience: options.Audience, Keys: provider,
-			Revocations: store, RequireTokenID: true,
+			Revocations: store, RequireTokenID: true, Validator: validator,
 		}, nil
 	}
 	buildMTLS := func() (hub.Authenticator, error) {
@@ -78,7 +95,7 @@ func buildAuthenticator(_ context.Context, options securityOptions, store core.R
 			}
 			principals[workloadID] = principal
 		}
-		return &hub.MTLSAuthenticator{Resolver: hub.StaticWorkloadResolver{Principals: principals}}, nil
+		return &hub.MTLSAuthenticator{Resolver: hub.StaticWorkloadResolver{Principals: principals}, Validator: validator}, nil
 	}
 
 	switch options.AuthMode {
@@ -114,7 +131,7 @@ func buildAuthenticator(_ context.Context, options securityOptions, store core.R
 		return &hub.JWTAuthenticator{
 			Issuer: options.Issuer, Audience: options.Audience,
 			Keys:        hub.StaticKeyProvider{Keys: map[string]any{options.KeyID: key}},
-			Revocations: store,
+			Revocations: store, Validator: validator,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported auth mode %q", options.AuthMode)
@@ -123,6 +140,19 @@ func buildAuthenticator(_ context.Context, options securityOptions, store core.R
 
 func buildAuthorizer(options securityOptions, provider secrets.Provider) (access.Authorizer, error) {
 	local := access.DefaultScopeAuthorizer()
+	if options.AccessPolicyFile != "" {
+		document, err := access.LoadPolicyFile(options.AccessPolicyFile)
+		if err != nil {
+			return nil, err
+		}
+		configured, err := access.NewPolicyAuthorizer(document)
+		if err != nil {
+			return nil, fmt.Errorf("local access policy: %w", err)
+		}
+		local = configured
+	} else if options.RequireTenantTrust {
+		return nil, errors.New("non-development authentication requires --access-policy-file")
+	}
 	if options.PolicyURL == "" {
 		return local, nil
 	}

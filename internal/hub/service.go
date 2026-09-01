@@ -33,6 +33,10 @@ type RegisterAgentInput struct {
 	ID            string            `json:"id,omitempty"`
 	CardURL       string            `json:"cardUrl"`
 	CredentialEnv map[string]string `json:"credentialEnv,omitempty"`
+	// RegistrationSource and RegistryEndpoint are Hub-internal provenance
+	// fields used by external Registry synchronization.
+	RegistrationSource string `json:"-"`
+	RegistryEndpoint   string `json:"-"`
 }
 
 // AgentRegistrationPolicy contains local constraints that a discovered
@@ -66,7 +70,7 @@ func (s *Service) ResolveAgent(ctx context.Context, tenantID, agentID, skill str
 		if strings.TrimSpace(skill) != "" && !hasSkill(agent, skill) {
 			return core.Agent{}, fmt.Errorf("Agent %q does not declare skill %q", agentID, skill)
 		}
-		if agent.HealthStatus == core.AgentHealthUnhealthy {
+		if agent.HealthStatus == core.AgentHealthUnhealthy || agent.HealthStatus == core.AgentHealthStale {
 			return core.Agent{}, fmt.Errorf("Agent %q is unhealthy: %s", agentID, agent.HealthMessage)
 		}
 		return agent, nil
@@ -79,7 +83,7 @@ func (s *Service) ResolveAgent(ctx context.Context, tenantID, agentID, skill str
 		return core.Agent{}, err
 	}
 	for _, agent := range agents {
-		if agent.HealthStatus != core.AgentHealthUnhealthy && hasSkill(agent, skill) {
+		if agent.HealthStatus != core.AgentHealthUnhealthy && agent.HealthStatus != core.AgentHealthStale && hasSkill(agent, skill) {
 			return agent, nil
 		}
 	}
@@ -221,10 +225,12 @@ func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, 
 		PushNotifications: descriptor.PushNotifications,
 		SecuritySchemes:   descriptor.SecuritySchemes, CardSignatureVerified: descriptor.CardSignatureVerified,
 		CardSignatureKeyID: descriptor.CardSignatureKeyID, Skills: descriptor.Skills,
-		CredentialEnv:     credentialEnv,
-		HealthStatus:      core.AgentHealthHealthy,
-		LastHealthCheckAt: &now,
-		CreatedAt:         now, UpdatedAt: now,
+		CredentialEnv:      credentialEnv,
+		RegistrationSource: input.RegistrationSource,
+		RegistryEndpoint:   input.RegistryEndpoint,
+		HealthStatus:       core.AgentHealthHealthy,
+		LastHealthCheckAt:  &now,
+		CreatedAt:          now, UpdatedAt: now,
 	}
 	if err := s.Store.PutAgent(ctx, agent); err != nil {
 		return core.Agent{}, err

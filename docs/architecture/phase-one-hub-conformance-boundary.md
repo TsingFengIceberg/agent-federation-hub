@@ -64,9 +64,9 @@ unhealthy until a later refresh succeeds.
 | Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack, HTTPS/DNS/IP policy, authenticated rate limiting and audit; real Go SDK Push sender smoke covers status and Artifact delivery | Replay timestamp/signature, dead-letter policy, HA ingress load test, and production sender qualification |
 | Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics; filesystem/S3 object storage, MIME/size/quota controls, ClamAV quarantine, authenticated retrieval, expiry leases | Encryption policy, DLP/legal hold, backup/restore, production throughput |
 | Errors | Sanitized transport/auth/authz/validation/resource/state/protocol categories | Complete binding-specific status equivalence and tenant policy details |
-| Registry | Durable built-in Agent Card registration by URL, skill selection, explicit Card refresh and health status | Nacos/ARD adapter, Card signature verification, scheduled refresh policy and external registry health |
+| Registry | Durable built-in Agent Card registration by URL, skill selection, explicit Card refresh and health status; HTTPS external Registry publication/import, stale-cache marking, bounded reads, and best-effort periodic sync are covered by a local reference smoke | Nacos/ARD production adapter, Card signature trust distribution, conflict policy, and managed Registry health/SLO qualification |
 | Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance; durable Outbox worker with CloudEvents sink and admin replay/retention | Priority, preemption, operator pause/drain, broker partitioning and managed event-bus operations |
-| Gateway | Direct A2A calls behind the federation Adapter interface | Managed agentgateway route, policy routing, rate limiting, egress controls |
+| Gateway | Direct A2A calls behind the federation Adapter interface; HTTPS external Gateway proxy with CA, optional mTLS client credentials, bounded safe retries, circuit breaking, Bearer configuration, Send/Get/Cancel/Subscribe forwarding, and explicit managed selection are covered by a local reference smoke | Managed agentgateway route, policy authoring, rate limiting, egress controls, and production Gateway SLO qualification |
 | AAMP | AAMP 1.1 lifecycle/result/attachment mapper into the common model | SMTP/JMAP client, discovery, sender policy, pairing, mailbox credentials |
 
 Remote Agent Card and selected endpoint URLs default to HTTPS and reject literal
@@ -127,6 +127,38 @@ the canonical catalog or mandatory traffic proxy. Future Nacos or ARD discovery
 can populate logical Agents, and an agentgateway route can implement the same
 outbound contract. Direct A2A remains valid when tenant policy and trust permit
 it; managed Gateway routing remains valid when policy requires central control.
+
+The executable control-plane boundary is intentionally small. `cmd/reference-
+registry` and `cmd/reference-gateway` provide local HTTPS contract fixtures;
+they hold no durable production state. `--registry-import-tenants` imports
+Agent Cards through the same discovery validation used for local configuration,
+while `--registry-sync-interval` performs best-effort refresh and keeps the
+last validated local cache when the Registry is unavailable. Gateway routing is
+selected explicitly at Hub startup, and the direct A2A adapter remains the
+default when no Gateway is configured. See
+[`tests/hub/run-registry-gateway-smoke.sh`](../../tests/hub/run-registry-gateway-smoke.sh).
+
+## Multi-Provider and Generality Validation
+
+[`tests/hub/run-federation-workflow-smoke.sh`](../../tests/hub/run-federation-workflow-smoke.sh)
+exercises two independently deployed Providers with concurrent fan-out,
+remote Task/Context correlation, `INPUT_REQUIRED` continuation, Artifact
+delivery, fan-in, partial Provider failure, and tenant isolation. It keeps
+Provider runtime state opaque and does not implement a business workflow.
+
+The machine-readable [`tests/scenarios/scenarios.json`](../../tests/scenarios/scenarios.json)
+maps software, finance, research, AIOps, multimedia, asynchronous, robotics,
+and marketplace scenarios to generic Hub invariants. The scenario runner only
+executes scenarios with a repository-owned adapter; entries marked `planned`
+or `external` are reported without fake business logic. Passing the runner is
+evidence for the selected scenario, not a blanket generality or production
+claim.
+
+Workflow-level persistence and compensation are defined in
+[`durable-federation-workflows.md`](durable-federation-workflows.md). The
+current evidence covers Journal/PostgreSQL aggregate durability and explicit
+provider-owned compensation Tasks; it does not claim rollback of arbitrary
+external side effects.
 
 ## AAMP Boundary
 

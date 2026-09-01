@@ -12,6 +12,10 @@ The repository separates tests by the evidence they provide:
 | PostgreSQL integration | [`postgres/run-integration.sh`](postgres/run-integration.sh) | local Docker | Real transactions, rollback, two-pool Task/Artifact leases, quota reservation, revocation, and inbox exclusion |
 | MinIO integration | [`minio/run-integration.sh`](minio/run-integration.sh) | local Docker | Actual S3-compatible Artifact Put, Stat, Get, and Delete operations |
 | Hub service smoke | [`hub/run-smoke.sh`](hub/run-smoke.sh) | no | Real Hub HTTP registration, A2A Task/Artifact exchange, and SSE replay against the Go fixture |
+| Registry/Gateway control plane | [`hub/run-registry-gateway-smoke.sh`](hub/run-registry-gateway-smoke.sh) | local TLS loopback | HTTPS reference Registry/Gateway, Bearer propagation, publication/import, Send/Get/Subscribe routing, and stale local cache during Registry outage |
+| Multi-Provider workflow | [`hub/run-federation-workflow-smoke.sh`](hub/run-federation-workflow-smoke.sh) | no | Concurrent fan-out, remote ID preservation, human approval continuation, fan-in, Artifact provenance, partial failure, and tenant isolation |
+| Domain Provider matrix | [`hub/run-domain-provider-matrix-smoke.sh`](hub/run-domain-provider-matrix-smoke.sh) | no | Three independent domain-labelled Providers, skill routing, Artifact delivery, HITL continuation, and tenant isolation |
+| Multi-runtime Provider | [`hub/run-multi-runtime-provider-smoke.sh`](hub/run-multi-runtime-provider-smoke.sh) | no | Independent Go and Python SDK Providers, cross-runtime A2A, Artifact/HITL continuation, remote correlation, and failure isolation |
 | Durable outbox worker | `go test ./internal/core ./internal/worker` | no | Transaction-linked Event outbox, lease exclusion, publish-before-ack, retry, and Journal restart replay |
 | A2A Push | [`hub/run-push-smoke.sh`](hub/run-push-smoke.sh) | local loopback | Pinned Go SDK HTTP Push sender to authenticated Hub receiver, including status and Artifact delivery |
 | CloudEvents collector | [`hub/run-cloudevents-smoke.sh`](hub/run-cloudevents-smoke.sh) | local TLS loopback | CloudEvents 1.0 structured delivery, tenant identity, stable idempotency, and real HTTPS collector response |
@@ -22,11 +26,48 @@ The repository separates tests by the evidence they provide:
 | Live provider | [`real-api/run-smoke.sh`](real-api/run-smoke.sh) | yes | End-to-end A2A Task and SSE behavior around a real model call |
 | Conformance pins | [`conformance/`](conformance/) | no | Machine-checked protocol/SDK/TCK revision and evidence status |
 | Inspector/TCK | [`conformance/run-tck.sh`](conformance/run-tck.sh) | local TCK checkout | Repository-owned JSON-RPC/SSE SUT evidence with machine-readable waivers and explicit skipped bindings; not full multi-binding conformance |
+| Generality scenario matrix | [`scenarios/run-matrix.sh`](scenarios/run-matrix.sh) | selected | Machine-readable domain scenarios mapped to provider-opaque Hub invariants; external business scenarios remain explicitly unimplemented |
 
 The deterministic layers are the regression baseline and must not depend on
 network availability, provider quotas, model output wording, or paid APIs. The
 live-provider layer is opt-in. It proves integration behavior but is not a stable
 conformance oracle.
+
+The local control-plane smoke uses `cmd/reference-registry` and
+`cmd/reference-gateway`. Both are intentionally in-memory HTTPS reference
+servers for contract testing, not production Registry or Gateway deployments.
+The Hub accepts `--registry-ca-file` and `--gateway-ca-file` for operator-owned
+CA bundles. `--registry-import-tenants` enables startup import from the
+external Registry, and `--registry-sync-interval` enables best-effort periodic
+refresh; an outage retains the already validated local cache.
+
+Control-plane clients also accept optional `--*-client-cert-file`,
+`--*-client-key-file`, and `--*-server-name` settings for operator-managed
+mTLS. Registry reads and Gateway `get`/`cancel`/`subscribe` use bounded retries;
+Gateway `send` is deliberately never replayed. A local circuit breaker opens
+after repeated dependency failures. These controls are exercised by transport
+unit tests and the Registry/Gateway smoke, but managed service qualification
+remains outside this repository.
+
+The two-Provider workflow contract can be run directly:
+
+```bash
+GO_BIN=/path/to/go tests/hub/run-federation-workflow-smoke.sh
+```
+
+The durable Workflow aggregate and explicit compensation contract are covered
+by `go test ./internal/orchestration`; the three-domain fixture can be run with:
+
+```bash
+GO_BIN=/path/to/go tests/hub/run-domain-provider-matrix-smoke.sh
+```
+
+Validate and run the generality matrix:
+
+```bash
+GO_BIN=/path/to/go tests/scenarios/run-matrix.sh
+tests/scenarios/run-matrix.sh --list
+```
 
 Run all deterministic repository-owned tests with:
 
@@ -88,6 +129,10 @@ AFH_RUN_TRUST_TESTS=1 go test ./internal/hub -run TestRealTrustBundleWithOIDCMTL
 - [`agent_config.example.yaml`](../agent_config.example.yaml) is the committed
   template for external Agent registrations. The local `agent_config.yaml` is
   ignored and is reserved for deployment-specific Agent endpoints and policy.
+- [`access_policy.example.json`](../access_policy.example.json) and
+  [`tenant_trust.example.json`](../tenant_trust.example.json) are committed
+  non-secret templates for non-development authorization and issuer/tenant
+  trust. Local copies are ignored.
 - API keys must not be placed in YAML configuration, A2A Messages, Artifacts,
   logs, or committed test output.
 - `model_api.headers` is for non-secret routing or compatibility headers only.

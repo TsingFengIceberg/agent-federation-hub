@@ -47,7 +47,10 @@ restart-replayed in the development journal.
 - Server TLS is mandatory outside development mode. mTLS additionally requires
   an operator-provided client CA and workload mapping.
 - The implementation does not operate an identity provider, CA, policy authoring
-  system, consent service, or credential vault.
+  system, consent service, or credential vault. Non-development startup also
+  requires explicit versioned issuer-to-tenant trust and local access-policy
+  documents; these are policy inputs, not an embedded identity provider or
+  policy administration system.
 - Local process-scoped and PostgreSQL-coordinated rate limiting, plus a `0600`
   JSONL audit sink and optional HTTPS central exporter with bounded retry, are
   implemented and exercised by unit, PostgreSQL, and opt-in TLS integration tests. Real partner

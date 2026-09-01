@@ -32,7 +32,8 @@ func (r StaticWorkloadResolver) ResolveWorkload(_ context.Context, workloadID st
 }
 
 type MTLSAuthenticator struct {
-	Resolver WorkloadIdentityResolver
+	Resolver  WorkloadIdentityResolver
+	Validator PrincipalValidator
 }
 
 func (a *MTLSAuthenticator) Authenticate(ctx context.Context, request *http.Request) (access.Principal, error) {
@@ -52,6 +53,11 @@ func (a *MTLSAuthenticator) Authenticate(ctx context.Context, request *http.Requ
 	if principal.Issuer == "" {
 		parsed, _ := url.Parse(workloadID)
 		principal.Issuer = "spiffe://" + parsed.Host
+	}
+	if a.Validator != nil {
+		if err := a.Validator.ValidatePrincipal(ctx, principal); err != nil {
+			return access.Principal{}, fmt.Errorf("%w: principal trust policy rejected the workload", access.ErrUnauthenticated)
+		}
 	}
 	return principal, nil
 }

@@ -73,7 +73,9 @@ type Authorizer interface {
 }
 
 type ScopeAuthorizer struct {
-	Required map[Action]string
+	Required       map[Action]string
+	RoleScopes     map[string]map[string]struct{}
+	TenantRequired map[string]map[Action]string
 }
 
 func DefaultScopeAuthorizer() *ScopeAuthorizer {
@@ -93,7 +95,7 @@ func DefaultScopeAuthorizer() *ScopeAuthorizer {
 		ActionPushConfigure:  "push:configure",
 		ActionSecurityRevoke: "security:revoke",
 		ActionArtifactRead:   "artifacts:read",
-	}}
+	}, RoleScopes: make(map[string]map[string]struct{}), TenantRequired: make(map[string]map[Action]string)}
 }
 
 func (a *ScopeAuthorizer) Authorize(_ context.Context, principal Principal, request Request) error {
@@ -101,23 +103,49 @@ func (a *ScopeAuthorizer) Authorize(_ context.Context, principal Principal, requ
 		return ErrUnauthenticated
 	}
 	required, ok := a.Required[request.Action]
-	if !ok || !principal.HasScope(required) {
+	if tenantRules, exists := a.TenantRequired[principal.TenantID]; exists {
+		if tenantRequired, configured := tenantRules[request.Action]; configured {
+			required, ok = tenantRequired, tenantRequired != ""
+		}
+	}
+	if !ok || !a.hasScope(principal, required) {
 		return ErrForbidden
 	}
 	return nil
 }
 
+func (a *ScopeAuthorizer) hasScope(principal Principal, required string) bool {
+	if principal.HasScope(required) {
+		return true
+	}
+	for _, role := range principal.Roles {
+		if scopes, ok := a.RoleScopes[role]; ok {
+			if _, found := scopes[required]; found {
+				return true
+			}
+			if _, found := scopes["*"]; found {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type AuditRecord struct {
-	Timestamp  time.Time `json:"timestamp"`
-	RequestID  string    `json:"requestId"`
-	Decision   string    `json:"decision"`
-	Action     Action    `json:"action,omitempty"`
-	Subject    string    `json:"subject,omitempty"`
-	TenantID   string    `json:"tenantId,omitempty"`
-	Issuer     string    `json:"issuer,omitempty"`
-	AuthMethod string    `json:"authMethod,omitempty"`
-	ResourceID string    `json:"resourceId,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
+	Version       int       `json:"version,omitempty"`
+	Sequence      uint64    `json:"sequence,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
+	RequestID     string    `json:"requestId"`
+	Decision      string    `json:"decision"`
+	Action        Action    `json:"action,omitempty"`
+	Subject       string    `json:"subject,omitempty"`
+	TenantID      string    `json:"tenantId,omitempty"`
+	Issuer        string    `json:"issuer,omitempty"`
+	AuthMethod    string    `json:"authMethod,omitempty"`
+	ResourceID    string    `json:"resourceId,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	PreviousHash  string    `json:"previousHash,omitempty"`
+	IntegrityHash string    `json:"integrityHash,omitempty"`
 }
 
 type AuditSink interface {

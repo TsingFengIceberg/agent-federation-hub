@@ -1,8 +1,11 @@
 package access
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,8 +34,10 @@ func (s *JSONAuditSink) Record(_ context.Context, record AuditRecord) error {
 }
 
 type FileAuditSink struct {
-	mu   sync.Mutex
-	file *os.File
+	mu       sync.Mutex
+	file     *os.File
+	sequence uint64
+	previous string
 }
 
 func OpenFileAuditSink(path string) (*FileAuditSink, error) {
@@ -42,7 +47,7 @@ func OpenFileAuditSink(path string) (*FileAuditSink, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create audit directory: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open audit file: %w", err)
 	}
@@ -50,7 +55,12 @@ func OpenFileAuditSink(path string) (*FileAuditSink, error) {
 		_ = file.Close()
 		return nil, fmt.Errorf("secure audit file: %w", err)
 	}
-	return &FileAuditSink{file: file}, nil
+	sink := &FileAuditSink{file: file}
+	if err := sink.loadChainState(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return sink, nil
 }
 
 func (s *FileAuditSink) Record(_ context.Context, record AuditRecord) error {
@@ -59,6 +69,15 @@ func (s *FileAuditSink) Record(_ context.Context, record AuditRecord) error {
 	if s.file == nil {
 		return fmt.Errorf("audit file is closed")
 	}
+	record.Version = 1
+	record.Sequence = s.sequence + 1
+	record.PreviousHash = s.previous
+	record.IntegrityHash = ""
+	digest, err := auditDigest(record)
+	if err != nil {
+		return err
+	}
+	record.IntegrityHash = digest
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -67,7 +86,67 @@ func (s *FileAuditSink) Record(_ context.Context, record AuditRecord) error {
 	if _, err := s.file.Write(encoded); err != nil {
 		return err
 	}
-	return s.file.Sync()
+	if err := s.file.Sync(); err != nil {
+		return err
+	}
+	s.sequence = record.Sequence
+	s.previous = record.IntegrityHash
+	return nil
+}
+
+func (s *FileAuditSink) loadChainState() error {
+	if _, err := s.file.Seek(0, 0); err != nil {
+		return fmt.Errorf("seek audit file: %w", err)
+	}
+	scanner := bufio.NewScanner(s.file)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	var previous string
+	var sequence uint64
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var record AuditRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			return fmt.Errorf("decode audit record: %w", err)
+		}
+		if record.IntegrityHash != "" {
+			if record.PreviousHash != previous || record.Sequence != sequence+1 {
+				return errors.New("audit integrity chain is broken")
+			}
+			want, err := auditDigest(record)
+			if err != nil || want != record.IntegrityHash {
+				return errors.New("audit integrity hash is invalid")
+			}
+			previous = record.IntegrityHash
+			sequence = record.Sequence
+		} else {
+			// Legacy records predate the chain. Preserve their bytes as the
+			// anchor while making the next record verifiable.
+			hash := sha256.Sum256(line)
+			previous = hex.EncodeToString(hash[:])
+			sequence++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read audit file: %w", err)
+	}
+	if _, err := s.file.Seek(0, 2); err != nil {
+		return fmt.Errorf("seek audit append position: %w", err)
+	}
+	s.sequence, s.previous = sequence, previous
+	return nil
+}
+
+func auditDigest(record AuditRecord) (string, error) {
+	record.IntegrityHash = ""
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func (s *FileAuditSink) Close() error {

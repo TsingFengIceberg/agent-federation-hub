@@ -5,6 +5,8 @@ import (
 	"iter"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
@@ -44,7 +46,7 @@ func TestGatewayHandlerAndAdapter(t *testing.T) {
 	endpoint := "http://" + listener.Addr().String()
 	adapter := &HTTPAdapter{Endpoint: endpoint, Client: &http.Client{}, Direct: fakeAdapter{}}
 	observations := make([]federation.Observation, 0)
-	for observation, err := range adapter.Send(context.Background(), core.Agent{ID: "agent"}, federation.Message{ID: "message", Text: "hello"}) {
+	for observation, err := range adapter.Send(context.Background(), core.Agent{ID: "agent", TenantID: "tenant"}, federation.Message{ID: "message", Text: "hello"}) {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -52,6 +54,15 @@ func TestGatewayHandlerAndAdapter(t *testing.T) {
 	}
 	if len(observations) != 1 || observations[0].State != core.TaskStateCompleted {
 		t.Fatalf("observations=%+v", observations)
+	}
+}
+
+func TestGatewayHandlerRejectsUnscopedRemoteOperation(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/proxy/get", strings.NewReader(`{"agent":{"id":"agent","tenantId":"tenant"}}`))
+	Handler{Adapter: fakeAdapter{}}.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

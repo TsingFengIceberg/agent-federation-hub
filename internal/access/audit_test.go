@@ -49,6 +49,34 @@ func TestFileAuditSinkPersistsAndRestrictsRecords(t *testing.T) {
 	if decoded.RequestID != record.RequestID || decoded.TenantID != record.TenantID {
 		t.Fatalf("decoded=%+v", decoded)
 	}
+	if decoded.Version != 1 || decoded.Sequence != 1 || decoded.IntegrityHash == "" {
+		t.Fatalf("audit chain metadata=%+v", decoded)
+	}
+}
+
+func TestFileAuditSinkRejectsTamperedChainOnReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	sink, err := OpenFileAuditSink(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Record(context.Background(), AuditRecord{RequestID: "chain-1", Decision: "allowed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = bytes.Replace(content, []byte("chain-1"), []byte("tampered"), 1)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenFileAuditSink(path); err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("tampered chain error=%v", err)
+	}
 }
 
 func TestHTTPAuditSinkUsesHTTPSAndBearerCallback(t *testing.T) {

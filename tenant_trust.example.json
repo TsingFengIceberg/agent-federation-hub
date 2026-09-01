@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "issuers": {
+    "https://idp.example.com": {
+      "tenants": [
+        "partner-a",
+        "partner-b"
+      ],
+      "requiredScopes": []
+    }
+  }
+}

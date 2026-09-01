@@ -38,11 +38,40 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 	}
 	if _, err := first.pool.Exec(ctx, `
 		TRUNCATE afh_artifacts, afh_artifact_usage, afh_token_revocations,
-			afh_events, afh_outbox, afh_inbox, afh_tasks, afh_agents CASCADE`); err != nil {
+			afh_workflow_events, afh_workflows, afh_events, afh_outbox, afh_inbox,
+			afh_tasks, afh_agents CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 
 	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	workflow, err := first.CreateWorkflow(ctx, Workflow{
+		ID: "workflow-1", TenantID: "tenant-a", Name: "durable-workflow",
+		State: WorkflowStateRunning, Steps: []WorkflowStep{{ID: "step-1", State: TaskStateWorking}},
+		CreatedAt: now, UpdatedAt: now,
+	}, WorkflowEvent{Type: "workflow.created", State: WorkflowStateRunning, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedWorkflow, applied, err := first.ApplyWorkflowVersion(ctx, workflow.TenantID, workflow.ID, workflow.Revision, "workflow-progress", func(workflow *Workflow) (WorkflowEvent, error) {
+		workflow.State = WorkflowStatePartiallyFailed
+		workflow.Steps[0].State = TaskStateCompleted
+		workflow.UpdatedAt = now.Add(time.Second)
+		return WorkflowEvent{Type: "workflow.step.status", State: workflow.State, StepID: "step-1", CreatedAt: workflow.UpdatedAt}, nil
+	})
+	if err != nil || !applied {
+		t.Fatalf("workflow mutation applied=%v err=%v", applied, err)
+	}
+	duplicateWorkflow, applied, err := second.ApplyWorkflowVersion(ctx, workflow.TenantID, workflow.ID, 0, "workflow-progress", func(workflow *Workflow) (WorkflowEvent, error) {
+		workflow.State = WorkflowStateFailed
+		return WorkflowEvent{Type: "must-not-apply", CreatedAt: now}, nil
+	})
+	if err != nil || applied || duplicateWorkflow.Revision != updatedWorkflow.Revision {
+		t.Fatalf("workflow duplicate=%+v applied=%v err=%v", duplicateWorkflow, applied, err)
+	}
+	persistedWorkflow, err := second.GetWorkflow(ctx, workflow.TenantID, workflow.ID)
+	if err != nil || persistedWorkflow.State != WorkflowStatePartiallyFailed {
+		t.Fatalf("workflow persistence=%+v err=%v", persistedWorkflow, err)
+	}
 	if err := first.PutAgent(ctx, Agent{
 		ID: "agent-1", TenantID: "tenant-a", Name: "remote",
 		CreatedAt: now, UpdatedAt: now,
@@ -58,7 +87,7 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 	}
 
 	mutationError := errors.New("rollback requested")
-	_, applied, err := first.ApplyTaskVersion(ctx, task.TenantID, task.ID, task.Revision, "rollback", func(task *Task) (Event, error) {
+	_, applied, err = first.ApplyTaskVersion(ctx, task.TenantID, task.ID, task.Revision, "rollback", func(task *Task) (Event, error) {
 		task.State = TaskStateFailed
 		return Event{Type: "task.status", CreatedAt: now}, mutationError
 	})

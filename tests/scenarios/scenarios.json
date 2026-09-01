@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "description": "Provider-opaque scenarios for validating reusable Hub invariants across domains.",
+  "evidenceStatus": "draft",
+  "scenarios": [
+    {
+      "id": "multi-provider-core",
+      "domain": "cross-domain collaboration",
+      "purpose": "Two independently deployed A2A Providers exchange Tasks and Artifacts through one tenant-scoped Hub.",
+      "providerCount": 2,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["provider internals remain opaque", "remote task and context identifiers are preserved", "a branch failure does not erase successful branches", "task and artifact state is tenant scoped"],
+      "adapterEntrypoint": "A2A AgentCard + configured binding profile",
+      "runner": "tests/hub/run-federation-workflow-smoke.sh",
+      "status": "verified",
+      "evidence": "repository-owned deterministic fixtures"
+    },
+    {
+      "id": "cross-domain-real-provider",
+      "domain": "competitive analysis and interoperability",
+      "purpose": "A real independently maintained Provider and a separate fixture use the same Hub contract.",
+      "providerCount": 2,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": false, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["Provider framework and model API are not visible to the Hub", "AgentCard is the capability boundary", "remote provenance survives reconciliation"],
+      "adapterEntrypoint": "A2A JSON-RPC/SSE",
+      "runner": "tests/real-api/run-cross-domain-smoke.sh",
+      "status": "verified",
+      "evidence": "local real-provider smoke; requires ca-agent and configured credentials"
+    },
+    {
+      "id": "domain-provider-matrix",
+      "domain": "travel, procurement, and incident response",
+      "purpose": "Three independently deployed domain-labelled Providers use skill routing, Artifacts, HITL continuation, and tenant isolation through one Hub.",
+      "providerCount": 3,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["domain-specific AgentCards are the only routing input", "remote Task and Context IDs remain opaque", "HITL continuation does not expose provider internals", "tenant state is isolated"],
+      "adapterEntrypoint": "A2A AgentCard skill routing",
+      "runner": "tests/hub/run-domain-provider-matrix-smoke.sh",
+      "status": "verified",
+      "evidence": "repository-owned independent process fixtures"
+    },
+    {
+      "id": "multi-runtime-provider",
+      "domain": "cross-runtime interoperability",
+      "purpose": "A Go SDK Provider and a Python SDK Provider use one Hub without exposing runtime-specific implementation state.",
+      "providerCount": 2,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["AgentCard and A2A are the only integration boundary", "remote IDs survive continuation", "runtime-specific behavior remains Provider-owned", "a stopped branch does not affect the other runtime"],
+      "adapterEntrypoint": "A2A JSON-RPC/SSE",
+      "runner": "tests/hub/run-multi-runtime-provider-smoke.sh",
+      "status": "verified",
+      "evidence": "repository-owned Go and Python SDK process fixtures"
+    },
+    {
+      "id": "software-development",
+      "domain": "software development",
+      "purpose": "Long-running implementation, review, sandbox Artifacts, approval, and restart recovery.",
+      "providerCount": 2,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["execution checkpoints remain Provider-owned", "Hub resumes by remote Task and Context IDs", "side-effecting Artifacts have durable provenance"],
+      "adapterEntrypoint": "A2A Provider adapter",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    },
+    {
+      "id": "procurement-finance",
+      "domain": "procurement and finance",
+      "purpose": "Cross-organization identity, delegated approval, payment intent, audit, and compensation.",
+      "providerCount": 3,
+      "requirements": {"streaming": false, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["tenant and delegated identity are auditable", "failed side effects expose compensation state", "no Provider receives another Provider's private state"],
+      "adapterEntrypoint": "A2A plus trust/token-exchange adapter",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    },
+    {
+      "id": "travel-research",
+      "domain": "travel and research",
+      "purpose": "Parallel research fan-out/fan-in with evidence Artifacts, partial failure, and provenance.",
+      "providerCount": 3,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": false, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["fan-in retains branch-level status", "evidence Artifacts retain source identity", "one unavailable Provider does not cancel unrelated work"],
+      "adapterEntrypoint": "A2A capability/skill routing",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    },
+    {
+      "id": "incident-response",
+      "domain": "incident response and AIOps",
+      "purpose": "Event-triggered investigation, priority, retries, bounded remediation, and cancellation.",
+      "providerCount": 3,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["event delivery is at-least-once and deduplicated", "remediation requires explicit policy", "cancellation intent is observable"],
+      "adapterEntrypoint": "A2A plus CloudEvents/Outbox",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    },
+    {
+      "id": "content-multimedia",
+      "domain": "content and multimedia",
+      "purpose": "Multimodal Artifact production, evaluation loops, and publishing side effects.",
+      "providerCount": 3,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["MIME and size policy is domain-neutral", "Artifact identity is content-addressed", "publishing remains an explicit Provider side effect"],
+      "adapterEntrypoint": "A2A multimodal Artifact adapter",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    },
+    {
+      "id": "personal-assistant-offline",
+      "domain": "personal assistant and asynchronous channels",
+      "purpose": "Offline or mailbox-connected Agents continue work across identity and channel boundaries.",
+      "providerCount": 2,
+      "requirements": {"streaming": false, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["AAMP mailbox correlation maps to the common Task model", "offline delivery does not change tenant ownership", "replayed messages are idempotent"],
+      "adapterEntrypoint": "AAMP asynchronous adapter",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    },
+    {
+      "id": "iot-robotics",
+      "domain": "IoT and robotics",
+      "purpose": "Real-time streams, tool calls, safety policy, and bounded physical side effects.",
+      "providerCount": 2,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": true, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["safety policy is evaluated before side effects", "stream disconnects are recoverable without duplicate commands", "tool outputs remain observable but opaque"],
+      "adapterEntrypoint": "A2A streaming/tool adapter",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    },
+    {
+      "id": "agent-marketplace",
+      "domain": "agent marketplace",
+      "purpose": "Dynamic discovery, trust, pricing, quotas, and untrusted participant isolation.",
+      "providerCount": 3,
+      "requirements": {"streaming": true, "artifacts": true, "humanApproval": false, "events": true, "recovery": true, "partialFailure": true, "tenantIsolation": true},
+      "hubInvariants": ["discovery does not imply trust", "quota and authorization are tenant/subject scoped", "untrusted AgentCards cannot expand Hub authority"],
+      "adapterEntrypoint": "external Registry + A2A Gateway",
+      "runner": "external",
+      "status": "planned",
+      "evidence": "scenario definition only"
+    }
+  ]
+}

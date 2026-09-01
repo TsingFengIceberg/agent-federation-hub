@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/hub"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/registry"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/transport"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/worker"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -46,6 +48,8 @@ func main() {
 	jwtPublicKeyFile := flag.String("jwt-public-key-file", "", "PEM public key file in jwt-static auth mode")
 	jwtKeyID := flag.String("jwt-key-id", "", "required JWT kid mapped to the configured static public key")
 	workloadIdentitiesFile := flag.String("workload-identities-file", "", "JSON mapping from SPIFFE workload IDs to tenant Principals")
+	tenantTrustFile := flag.String("tenant-trust-file", "", "versioned JSON issuer-to-tenant trust policy")
+	accessPolicyFile := flag.String("access-policy-file", "", "versioned JSON local role and action authorization policy")
 	tlsCertificateFile := flag.String("tls-cert-file", "", "PEM server certificate file")
 	tlsKeyFile := flag.String("tls-key-file", "", "PEM server private key file")
 	tlsClientCAFile := flag.String("tls-client-ca-file", "", "PEM client CA bundle for mTLS authentication")
@@ -61,8 +65,26 @@ func main() {
 	a2aRequireSignedCards := flag.Bool("a2a-require-signed-cards", false, "reject AgentCards without a valid configured JWS signature")
 	registryURL := flag.String("registry-url", "", "optional HTTPS Agent Registry endpoint")
 	registryTokenReference := flag.String("registry-token-ref", "", "optional SecretProvider reference for the Agent Registry")
+	registryCAFile := flag.String("registry-ca-file", "", "optional PEM CA bundle for the Agent Registry HTTPS endpoint")
+	registryClientCertFile := flag.String("registry-client-cert-file", "", "optional PEM client certificate for the Agent Registry")
+	registryClientKeyFile := flag.String("registry-client-key-file", "", "optional PEM client key for the Agent Registry")
+	registryServerName := flag.String("registry-server-name", "", "optional TLS server name for the Agent Registry")
+	registryMaxResponseBytes := flag.Int64("registry-max-response-bytes", 1<<20, "maximum Registry response bytes")
+	registryImportTenants := flag.String("registry-import-tenants", "", "comma-separated tenant IDs to import from the external Registry")
+	registrySyncInterval := flag.Duration("registry-sync-interval", 0, "optional interval for re-importing external Registry Agents; zero disables")
 	gatewayURL := flag.String("gateway-url", "", "optional HTTPS A2A Gateway endpoint for outbound calls")
 	gatewayTokenReference := flag.String("gateway-token-ref", "", "optional SecretProvider reference for the A2A Gateway")
+	gatewayCAFile := flag.String("gateway-ca-file", "", "optional PEM CA bundle for the A2A Gateway HTTPS endpoint")
+	gatewayClientCertFile := flag.String("gateway-client-cert-file", "", "optional PEM client certificate for the A2A Gateway")
+	gatewayClientKeyFile := flag.String("gateway-client-key-file", "", "optional PEM client key for the A2A Gateway")
+	gatewayServerName := flag.String("gateway-server-name", "", "optional TLS server name for the A2A Gateway")
+	gatewayMaxResponseBytes := flag.Int64("gateway-max-response-bytes", 1<<20, "maximum Gateway response bytes")
+	controlPlaneMaxAttempts := flag.Int("control-plane-max-attempts", 3, "maximum safe retry attempts for Registry reads and Gateway non-send operations")
+	controlPlaneRetryInitial := flag.Duration("control-plane-retry-initial", 100*time.Millisecond, "initial control-plane retry backoff")
+	controlPlaneRetryMax := flag.Duration("control-plane-retry-max", 2*time.Second, "maximum control-plane retry backoff")
+	controlPlaneCircuitFailures := flag.Int("control-plane-circuit-failures", 3, "consecutive control-plane failures before opening the local circuit")
+	controlPlaneCircuitOpen := flag.Duration("control-plane-circuit-open", 15*time.Second, "control-plane circuit-open duration")
+	requireControlPlaneReady := flag.Bool("require-control-plane-ready", false, "fail /readyz when configured external Registry or Gateway is unavailable")
 	reconcileInterval := flag.Duration("reconcile-interval", 30*time.Second, "interval for polling recoverable remote Tasks")
 	workerID := flag.String("worker-id", "", "unique background worker identity; generated when empty")
 	leaseDuration := flag.Duration("worker-lease-duration", 30*time.Second, "background reconciliation lease duration")
@@ -311,6 +333,31 @@ func main() {
 		if err != nil {
 			log.Fatalf("A2A Gateway: %v", err)
 		}
+		if *gatewayCAFile != "" {
+			client, clientErr := httpClientWithTLS(*gatewayCAFile, *gatewayClientCertFile, *gatewayClientKeyFile, *gatewayServerName, 30*time.Second)
+			if clientErr != nil {
+				log.Fatalf("A2A Gateway CA: %v", clientErr)
+			}
+			outboundAdapter.(*gateway.HTTPAdapter).SetHTTPClient(client)
+		} else if *gatewayClientCertFile != "" || *gatewayClientKeyFile != "" || *gatewayServerName != "" {
+			client, clientErr := httpClientWithTLS("", *gatewayClientCertFile, *gatewayClientKeyFile, *gatewayServerName, 30*time.Second)
+			if clientErr != nil {
+				log.Fatalf("A2A Gateway TLS: %v", clientErr)
+			}
+			outboundAdapter.(*gateway.HTTPAdapter).SetHTTPClient(client)
+		}
+		gatewayClient := outboundAdapter.(*gateway.HTTPAdapter)
+		gatewayClient.MaxResponseBytes = *gatewayMaxResponseBytes
+		gatewayClient.SetRetryPolicy(transport.RetryPolicy{
+			MaxAttempts: *controlPlaneMaxAttempts, InitialBackoff: *controlPlaneRetryInitial, MaxBackoff: *controlPlaneRetryMax,
+			RetryRequest: func(request *http.Request) bool {
+				return request.Method == http.MethodPost && request.Header.Get("X-AFH-Gateway-Operation") != "send"
+			},
+		})
+		gatewayClient.SetHTTPClient(transport.WithCircuitBreaker(gatewayClient.Client, transport.CircuitBreakerPolicy{
+			FailureThreshold: *controlPlaneCircuitFailures,
+			OpenFor:          *controlPlaneCircuitOpen,
+		}))
 	}
 	var externalRegistry registry.Client
 	if *registryURL != "" {
@@ -327,6 +374,28 @@ func main() {
 		if err != nil {
 			log.Fatalf("Agent Registry: %v", err)
 		}
+		if *registryCAFile != "" {
+			client, clientErr := httpClientWithTLS(*registryCAFile, *registryClientCertFile, *registryClientKeyFile, *registryServerName, 10*time.Second)
+			if clientErr != nil {
+				log.Fatalf("Agent Registry CA: %v", clientErr)
+			}
+			externalRegistry.(*registry.HTTPClient).SetHTTPClient(client)
+		} else if *registryClientCertFile != "" || *registryClientKeyFile != "" || *registryServerName != "" {
+			client, clientErr := httpClientWithTLS("", *registryClientCertFile, *registryClientKeyFile, *registryServerName, 10*time.Second)
+			if clientErr != nil {
+				log.Fatalf("Agent Registry TLS: %v", clientErr)
+			}
+			externalRegistry.(*registry.HTTPClient).SetHTTPClient(client)
+		}
+		registryClient := externalRegistry.(*registry.HTTPClient)
+		registryClient.MaxResponseBytes = *registryMaxResponseBytes
+		registryClient.SetRetryPolicy(transport.RetryPolicy{
+			MaxAttempts: *controlPlaneMaxAttempts, InitialBackoff: *controlPlaneRetryInitial, MaxBackoff: *controlPlaneRetryMax,
+		})
+		registryClient.SetHTTPClient(transport.WithCircuitBreaker(registryClient.Client, transport.CircuitBreakerPolicy{
+			FailureThreshold: *controlPlaneCircuitFailures,
+			OpenFor:          *controlPlaneCircuitOpen,
+		}))
 		if err := externalRegistry.Health(context.Background()); err != nil {
 			log.Fatalf("Agent Registry health: %v", err)
 		}
@@ -337,6 +406,7 @@ func main() {
 		Secrets:               secretProvider,
 		Artifacts:             artifacts,
 	}
+	configuredTenants := make(map[string]struct{})
 	if *agentConfigPath != "" {
 		configuredAgents, configErr := agentconfig.LoadFile(*agentConfigPath)
 		if configErr != nil {
@@ -346,6 +416,7 @@ func main() {
 			log.Printf("Agent configuration %q does not exist; continuing without configured Agents", *agentConfigPath)
 		} else {
 			for _, registration := range configuredAgents.EnabledAgents() {
+				configuredTenants[registration.TenantID] = struct{}{}
 				if registration.AllowsPrivateURLs(configuredAgents.Defaults) && !*allowPrivateAgentURLs {
 					log.Fatalf("configured Agent %q allows private URLs; pass --allow-private-agent-urls for local development", registration.ID)
 				}
@@ -366,6 +437,13 @@ func main() {
 			}
 		}
 	}
+	if externalRegistry != nil {
+		for _, tenantID := range registryTenants(*registryImportTenants, configuredTenants) {
+			if err := importRegistryAgents(context.Background(), externalRegistry, service, tenantID, *registryURL); err != nil {
+				log.Printf("external Registry import for tenant %q failed; keeping local cache: %v", tenantID, err)
+			}
+		}
+	}
 	revocations, ok := store.(core.RevocationStore)
 	if !ok {
 		log.Fatal("configured Store does not implement token revocation")
@@ -376,6 +454,8 @@ func main() {
 		WorkloadIdentityFile: *workloadIdentitiesFile,
 		PolicyURL:            *policyURL, PolicyTokenReference: *policyTokenReference,
 		TokenProfilesFile: *tokenProfilesFile, TLSClientCAFile: *tlsClientCAFile,
+		TenantTrustFile: *tenantTrustFile, RequireTenantTrust: *authMode != "development",
+		AccessPolicyFile: *accessPolicyFile,
 	}
 	authenticator, err := buildAuthenticator(context.Background(), security, revocations)
 	if err != nil {
@@ -408,6 +488,18 @@ func main() {
 				return err
 			}
 		}
+		if *requireControlPlaneReady {
+			if externalRegistry != nil {
+				if err := externalRegistry.Health(ctx); err != nil {
+					return fmt.Errorf("external Registry is not ready: %w", err)
+				}
+			}
+			if gatewayClient, ok := outboundAdapter.(*gateway.HTTPAdapter); ok {
+				if err := gatewayClient.Health(ctx); err != nil {
+					return fmt.Errorf("external Gateway is not ready: %w", err)
+				}
+			}
+		}
 		return nil
 	}
 	handler := (&hub.HTTPHandler{
@@ -434,6 +526,27 @@ func main() {
 	background := &worker.Reconciler{
 		Store: store, Tasks: service, WorkerID: resolvedWorkerID,
 		LeaseDuration: *leaseDuration, PollInterval: *reconcileInterval,
+	}
+	var registrySyncCancel context.CancelFunc
+	if externalRegistry != nil && *registrySyncInterval > 0 {
+		registryCtx, cancel := context.WithCancel(ctx)
+		registrySyncCancel = cancel
+		go func() {
+			ticker := time.NewTicker(*registrySyncInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-registryCtx.Done():
+					return
+				case <-ticker.C:
+					for _, tenantID := range registryTenants(*registryImportTenants, configuredTenants) {
+						if err := importRegistryAgents(registryCtx, externalRegistry, service, tenantID, *registryURL); err != nil {
+							log.Printf("external Registry sync for tenant %q failed; retaining local cache: %v", tenantID, err)
+						}
+					}
+				}
+			}
+		}()
 	}
 	inbox := &worker.InboxProcessor{
 		Store: store, Apply: service, WorkerID: resolvedWorkerID + ":inbox",
@@ -489,6 +602,9 @@ func main() {
 		log.Fatal(serveErr)
 	}
 	stop()
+	if registrySyncCancel != nil {
+		registrySyncCancel()
+	}
 	drainDone := make(chan struct{})
 	go func() {
 		workers.Wait()
@@ -502,6 +618,103 @@ func main() {
 	case <-drainTimer.C:
 		log.Printf("background worker drain timed out after %s", *workerDrainTimeout)
 	}
+}
+
+func httpClientWithTLS(caFile, clientCertFile, clientKeyFile, serverName string, timeout time.Duration) (*http.Client, error) {
+	var caPEM, certificatePEM, keyPEM []byte
+	var err error
+	if caFile != "" {
+		caPEM, err = os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA bundle: %w", err)
+		}
+	}
+	if clientCertFile != "" {
+		certificatePEM, err = os.ReadFile(clientCertFile)
+		if err != nil {
+			return nil, fmt.Errorf("read client certificate: %w", err)
+		}
+	}
+	if clientKeyFile != "" {
+		keyPEM, err = os.ReadFile(clientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read client key: %w", err)
+		}
+	}
+	options, err := transport.LoadTLSOptions(caPEM, certificatePEM, keyPEM, serverName)
+	if err != nil {
+		return nil, err
+	}
+	return transport.NewHTTPClient(timeout, options), nil
+}
+
+func registryTenants(explicit string, configured map[string]struct{}) []string {
+	seen := make(map[string]struct{})
+	var tenants []string
+	for _, value := range strings.Split(explicit, ",") {
+		if tenant := strings.TrimSpace(value); tenant != "" {
+			seen[tenant] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		for tenant := range configured {
+			seen[tenant] = struct{}{}
+		}
+	}
+	for tenant := range seen {
+		tenants = append(tenants, tenant)
+	}
+	sort.Strings(tenants)
+	return tenants
+}
+
+func importRegistryAgents(ctx context.Context, external registry.Client, service *hub.Service, tenantID, registryEndpoint string) error {
+	if strings.TrimSpace(tenantID) == "" {
+		return errors.New("tenant ID is required for Registry import")
+	}
+	agents, err := external.List(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(agents))
+	for _, candidate := range agents {
+		if candidate.TenantID != "" && candidate.TenantID != tenantID {
+			continue
+		}
+		if strings.TrimSpace(candidate.ID) == "" {
+			return errors.New("external Registry returned an Agent without an ID")
+		}
+		seen[candidate.ID] = struct{}{}
+		if _, err := service.RegisterAgent(ctx, tenantID, hub.RegisterAgentInput{
+			ID: candidate.ID, CardURL: candidate.CardURL, CredentialEnv: candidate.CredentialEnv,
+			RegistrationSource: "external-registry", RegistryEndpoint: registryEndpoint,
+		}); err != nil {
+			return fmt.Errorf("import Agent %q: %w", candidate.ID, err)
+		}
+	}
+	local, err := service.ListAgents(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("list local Agent cache: %w", err)
+	}
+	now := time.Now().UTC()
+	for _, candidate := range local {
+		if candidate.RegistrationSource != "external-registry" || candidate.RegistryEndpoint != registryEndpoint {
+			continue
+		}
+		candidate.LastRegistrySyncAt = &now
+		if _, exists := seen[candidate.ID]; !exists {
+			candidate.HealthStatus = core.AgentHealthStale
+			candidate.HealthMessage = "Agent was not present in the latest Registry snapshot"
+		} else if candidate.HealthStatus == core.AgentHealthStale {
+			candidate.HealthStatus = core.AgentHealthHealthy
+			candidate.HealthMessage = ""
+		}
+		candidate.UpdatedAt = now
+		if err := service.Store.PutAgent(ctx, candidate); err != nil {
+			return fmt.Errorf("update Registry cache Agent %q: %w", candidate.ID, err)
+		}
+	}
+	return nil
 }
 
 func buildRateLimiter(ctx context.Context, backend string, perMinute, burst int, postgresDSN string) (access.RateLimiter, func(), error) {

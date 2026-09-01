@@ -5,6 +5,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 "$repo_root/tests/run-unit.sh"
 "$repo_root/tests/hub/run-smoke.sh"
+"$repo_root/tests/hub/run-federation-workflow-smoke.sh"
+"$repo_root/tests/hub/run-registry-gateway-smoke.sh"
+"$repo_root/tests/hub/run-domain-provider-matrix-smoke.sh"
+"$repo_root/tests/hub/run-multi-runtime-provider-smoke.sh"
 "$repo_root/tests/interop/run-smoke.sh"
 "$repo_root/tests/real-api/run-mock-smoke.sh"
 

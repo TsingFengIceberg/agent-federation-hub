@@ -36,6 +36,7 @@ agent_pid=$!
 "$hub_bin" \
   -listen "127.0.0.1:$hub_port" \
   -journal "$run_dir/hub.journal" \
+  -agent-config "" \
   -auth-mode development \
   -allow-private-agent-urls \
   -reconcile-interval 0 \
@@ -77,6 +78,15 @@ task=$(curl --fail-with-body --silent --show-error \
   --data '{"agentId":"go-fixture","text":"artifact-data"}' \
   "http://127.0.0.1:$hub_port/v1/tasks")
 
+task_id=$(jq -r '.id' <<<"$task")
+for _ in $(seq 1 100); do
+	state=$(jq -r '.state' <<<"$task")
+	[[ "$state" == "COMPLETED" ]] && break
+	sleep 0.1
+	task=$(curl --fail --silent -H 'X-AFH-Tenant-ID: smoke-tenant' \
+	  "http://127.0.0.1:$hub_port/v1/tasks/$task_id")
+done
+
 jq -e '
   .state == "COMPLETED" and
   .delivery == "ACKNOWLEDGED" and
@@ -86,7 +96,6 @@ jq -e '
   (.pushTokenHash | not)
 ' <<<"$task" >/dev/null
 
-task_id=$(jq -r '.id' <<<"$task")
 events=$(curl --fail-with-body --silent --show-error \
   -H 'Accept: text/event-stream' \
   -H 'Last-Event-ID: 2' \

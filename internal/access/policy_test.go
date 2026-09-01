@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -13,6 +15,48 @@ type policyRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f policyRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+func TestPolicyDocumentLoadsRoleAndTenantRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	content := `{"version":1,"roles":{"operator":["tasks:read","agents:read"]},"tenantActions":{"tenant-a":{"task.read":"tasks:read"}}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := LoadPolicyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer, err := NewPolicyAuthorizer(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := Principal{Subject: "operator-1", TenantID: "tenant-a", Roles: []string{"operator"}}
+	if err := authorizer.Authorize(context.Background(), principal, Request{Action: ActionTaskRead}); err != nil {
+		t.Fatalf("role authorization failed: %v", err)
+	}
+}
+
+func TestPolicyDocumentRejectsUnknownActionAndVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"actions":{"unknown.action":"x"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPolicyFile(path); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("unknown action error=%v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPolicyFile(path); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("version error=%v", err)
+	}
+}
+
+func TestRepositoryAccessPolicyExampleRemainsValid(t *testing.T) {
+	if _, err := LoadPolicyFile("../../access_policy.example.json"); err != nil {
+		t.Fatalf("load access_policy.example.json: %v", err)
+	}
 }
 
 type staticBearer string

@@ -22,6 +22,12 @@ type Authenticator interface {
 	Authenticate(context.Context, *http.Request) (access.Principal, error)
 }
 
+// PrincipalValidator applies deployment-specific issuer, tenant, delegation,
+// or trust-domain policy after cryptographic authentication succeeds.
+type PrincipalValidator interface {
+	ValidatePrincipal(context.Context, access.Principal) error
+}
+
 type DevelopmentAuthenticator struct{}
 
 func (DevelopmentAuthenticator) Authenticate(_ context.Context, request *http.Request) (access.Principal, error) {
@@ -80,6 +86,7 @@ type JWTAuthenticator struct {
 		TokenRevoked(context.Context, string, string, string, time.Time) (bool, error)
 	}
 	RequireTokenID bool
+	Validator      PrincipalValidator
 	Leeway         time.Duration
 	Now            func() time.Time
 }
@@ -141,6 +148,11 @@ func (a *JWTAuthenticator) Authenticate(ctx context.Context, request *http.Reque
 	}
 	if a.RequireTokenID && principal.TokenID == "" {
 		return access.Principal{}, fmt.Errorf("%w: token ID claim is required", access.ErrUnauthenticated)
+	}
+	if a.Validator != nil {
+		if err := a.Validator.ValidatePrincipal(ctx, principal); err != nil {
+			return access.Principal{}, fmt.Errorf("%w: principal trust policy rejected the token", access.ErrUnauthenticated)
+		}
 	}
 	if a.Revocations != nil && principal.TokenID != "" {
 		revoked, err := a.Revocations.TokenRevoked(ctx, principal.Issuer, principal.TokenID, principal.TenantID, a.now())

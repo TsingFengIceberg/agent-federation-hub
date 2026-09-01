@@ -38,6 +38,16 @@ type Store interface {
 	Close() error
 }
 
+// WorkflowStore persists Hub-owned workflow aggregates independently from
+// provider-owned Task state. Implementations must make workflow mutation and
+// its event durable before returning.
+type WorkflowStore interface {
+	CreateWorkflow(context.Context, Workflow, WorkflowEvent) (Workflow, error)
+	ApplyWorkflowVersion(context.Context, string, string, uint64, string, func(*Workflow) (WorkflowEvent, error)) (Workflow, bool, error)
+	GetWorkflow(context.Context, string, string) (Workflow, error)
+	ListWorkflows(context.Context, string) ([]Workflow, error)
+}
+
 type LeasedStore interface {
 	Store
 	ClaimRecoverable(context.Context, string, int, time.Time, time.Duration) ([]WorkLease, error)
@@ -161,6 +171,9 @@ type journalRecord struct {
 	ArtifactUsage   *ArtifactUsage      `json:"artifactUsage,omitempty"`
 	ArtifactLeaseID string              `json:"artifactLeaseId,omitempty"`
 	ArtifactLease   *artifactLeaseState `json:"artifactLease,omitempty"`
+	Workflow        *Workflow           `json:"workflow,omitempty"`
+	WorkflowEvent   *WorkflowEvent      `json:"workflowEvent,omitempty"`
+	WorkflowKey     string              `json:"workflowKey,omitempty"`
 }
 
 type JournalStore struct {
@@ -181,6 +194,8 @@ type JournalStore struct {
 	artifactObjects map[string]ArtifactObject
 	artifactUsage   map[string]ArtifactUsage
 	artifactLeases  map[string]artifactLeaseState
+	workflows       map[string]Workflow
+	workflowDedup   map[string]map[string]struct{}
 }
 
 type JournalBackupManifest struct {
@@ -402,6 +417,8 @@ func OpenJournal(path string) (*JournalStore, error) {
 		artifactObjects: make(map[string]ArtifactObject),
 		artifactUsage:   make(map[string]ArtifactUsage),
 		artifactLeases:  make(map[string]artifactLeaseState),
+		workflows:       make(map[string]Workflow),
+		workflowDedup:   make(map[string]map[string]struct{}),
 	}
 	if path == "" {
 		return store, nil
@@ -517,6 +534,18 @@ func (s *JournalStore) applyRecord(record journalRecord) {
 		if record.ArtifactLeaseID != "" && record.ArtifactLease != nil {
 			s.artifactLeases[record.ArtifactLeaseID] = *record.ArtifactLease
 		}
+	case "workflow":
+		if record.Workflow == nil {
+			return
+		}
+		key := resourceKey(record.Workflow.TenantID, record.Workflow.ID)
+		s.workflows[key] = *record.Workflow
+		if record.WorkflowEvent != nil {
+			if s.workflowDedup[key] == nil {
+				s.workflowDedup[key] = make(map[string]struct{})
+			}
+			s.workflowDedup[key][record.WorkflowEvent.DedupKey] = struct{}{}
+		}
 	}
 }
 
@@ -606,6 +635,111 @@ func (s *JournalStore) CreateTask(_ context.Context, task Task, event Event) (Ta
 	}
 	s.applyRecord(record)
 	return task, nil
+}
+
+func (s *JournalStore) CreateWorkflow(_ context.Context, workflow Workflow, event WorkflowEvent) (Workflow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if workflow.TenantID == "" || workflow.ID == "" || len(workflow.Steps) == 0 {
+		return Workflow{}, errors.New("workflow tenant, ID, and steps are required")
+	}
+	key := resourceKey(workflow.TenantID, workflow.ID)
+	if _, exists := s.workflows[key]; exists {
+		return Workflow{}, ErrConflict
+	}
+	workflow.Revision = 1
+	workflow.LastSequence = 1
+	event.ID = NewID()
+	event.WorkflowID = workflow.ID
+	event.TenantID = workflow.TenantID
+	event.Sequence = 1
+	if event.DedupKey == "" {
+		event.DedupKey = "local:" + event.ID
+	}
+	record := journalRecord{Version: 1, Kind: "workflow", Workflow: &workflow, WorkflowEvent: &event}
+	if err := s.append(record); err != nil {
+		return Workflow{}, err
+	}
+	s.applyRecord(record)
+	return CloneWorkflow(workflow)
+}
+
+func (s *JournalStore) ApplyWorkflowVersion(
+	_ context.Context,
+	tenantID, id string,
+	expectedRevision uint64,
+	dedupKey string,
+	mutate func(*Workflow) (WorkflowEvent, error),
+) (Workflow, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := resourceKey(tenantID, id)
+	current, ok := s.workflows[key]
+	if !ok {
+		return Workflow{}, false, ErrNotFound
+	}
+	if expectedRevision != 0 && current.Revision != expectedRevision {
+		return current, false, ErrRevisionConflict
+	}
+	if dedupKey != "" {
+		if _, duplicate := s.workflowDedup[key][dedupKey]; duplicate {
+			clone, cloneErr := CloneWorkflow(current)
+			return clone, false, cloneErr
+		}
+	}
+	updated, err := CloneWorkflow(current)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	event, err := mutate(&updated)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	updated.Revision++
+	updated.LastSequence++
+	event.ID = NewID()
+	event.WorkflowID = updated.ID
+	event.TenantID = updated.TenantID
+	event.Sequence = updated.LastSequence
+	event.DedupKey = dedupKey
+	if event.DedupKey == "" {
+		event.DedupKey = "local:" + event.ID
+	}
+	record := journalRecord{Version: 1, Kind: "workflow", Workflow: &updated, WorkflowEvent: &event}
+	if err := s.append(record); err != nil {
+		return Workflow{}, false, err
+	}
+	s.applyRecord(record)
+	clone, cloneErr := CloneWorkflow(updated)
+	return clone, true, cloneErr
+}
+
+func (s *JournalStore) GetWorkflow(_ context.Context, tenantID, id string) (Workflow, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	workflow, ok := s.workflows[resourceKey(tenantID, id)]
+	if !ok {
+		return Workflow{}, ErrNotFound
+	}
+	return CloneWorkflow(workflow)
+}
+
+func (s *JournalStore) ListWorkflows(_ context.Context, tenantID string) ([]Workflow, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Workflow, 0)
+	for _, workflow := range s.workflows {
+		if workflow.TenantID != tenantID {
+			continue
+		}
+		clone, err := CloneWorkflow(workflow)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, clone)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
 }
 
 func (s *JournalStore) ApplyTask(

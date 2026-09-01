@@ -226,6 +226,157 @@ func (s *PostgresStore) CreateTask(ctx context.Context, task Task, event Event) 
 	return task, nil
 }
 
+func (s *PostgresStore) CreateWorkflow(ctx context.Context, workflow Workflow, event WorkflowEvent) (Workflow, error) {
+	if workflow.TenantID == "" || workflow.ID == "" || len(workflow.Steps) == 0 {
+		return Workflow{}, errors.New("workflow tenant, ID, and steps are required")
+	}
+	workflow.Revision = 1
+	workflow.LastSequence = 1
+	event.ID = NewID()
+	event.WorkflowID = workflow.ID
+	event.TenantID = workflow.TenantID
+	event.Sequence = 1
+	if event.DedupKey == "" {
+		event.DedupKey = "local:" + event.ID
+	}
+	workflowPayload, eventPayload, err := encodeWorkflowAndEvent(workflow, event)
+	if err != nil {
+		return Workflow{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return Workflow{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO afh_workflows (tenant_id, id, payload, revision, state, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		workflow.TenantID, workflow.ID, workflowPayload, workflow.Revision, workflow.State, workflow.UpdatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return Workflow{}, ErrConflict
+		}
+		return Workflow{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO afh_workflow_events (tenant_id, workflow_id, sequence, dedup_key, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		event.TenantID, event.WorkflowID, event.Sequence, event.DedupKey, eventPayload, event.CreatedAt); err != nil {
+		return Workflow{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Workflow{}, err
+	}
+	return workflow, nil
+}
+
+func (s *PostgresStore) ApplyWorkflowVersion(
+	ctx context.Context,
+	tenantID, id string,
+	expectedRevision uint64,
+	dedupKey string,
+	mutate func(*Workflow) (WorkflowEvent, error),
+) (Workflow, bool, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	var payload []byte
+	if err := tx.QueryRow(ctx, `SELECT payload FROM afh_workflows WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, id).Scan(&payload); err != nil {
+		return Workflow{}, false, mapPostgresNotFound(err)
+	}
+	var current Workflow
+	if err := json.Unmarshal(payload, &current); err != nil {
+		return Workflow{}, false, fmt.Errorf("decode stored Workflow: %w", err)
+	}
+	if expectedRevision != 0 && current.Revision != expectedRevision {
+		return current, false, ErrRevisionConflict
+	}
+	if dedupKey != "" {
+		var duplicate bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM afh_workflow_events WHERE tenant_id=$1 AND workflow_id=$2 AND dedup_key=$3)`, tenantID, id, dedupKey).Scan(&duplicate); err != nil {
+			return Workflow{}, false, err
+		}
+		if duplicate {
+			return current, false, nil
+		}
+	}
+	updated, err := CloneWorkflow(current)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	event, err := mutate(&updated)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	updated.Revision++
+	updated.LastSequence++
+	event.ID = NewID()
+	event.WorkflowID = updated.ID
+	event.TenantID = updated.TenantID
+	event.Sequence = updated.LastSequence
+	event.DedupKey = dedupKey
+	if event.DedupKey == "" {
+		event.DedupKey = "local:" + event.ID
+	}
+	workflowPayload, eventPayload, err := encodeWorkflowAndEvent(updated, event)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE afh_workflows SET payload=$1, revision=$2, state=$3, updated_at=$4
+		WHERE tenant_id=$5 AND id=$6 AND revision=$7`,
+		workflowPayload, updated.Revision, updated.State, updated.UpdatedAt, tenantID, id, current.Revision)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	if command.RowsAffected() != 1 {
+		return current, false, ErrRevisionConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO afh_workflow_events (tenant_id, workflow_id, sequence, dedup_key, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`, event.TenantID, event.WorkflowID, event.Sequence, event.DedupKey, eventPayload, event.CreatedAt); err != nil {
+		return Workflow{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Workflow{}, false, err
+	}
+	return updated, true, nil
+}
+
+func (s *PostgresStore) GetWorkflow(ctx context.Context, tenantID, id string) (Workflow, error) {
+	var payload []byte
+	if err := s.pool.QueryRow(ctx, `SELECT payload FROM afh_workflows WHERE tenant_id=$1 AND id=$2`, tenantID, id).Scan(&payload); err != nil {
+		return Workflow{}, mapPostgresNotFound(err)
+	}
+	var workflow Workflow
+	if err := json.Unmarshal(payload, &workflow); err != nil {
+		return Workflow{}, fmt.Errorf("decode stored Workflow: %w", err)
+	}
+	return workflow, nil
+}
+
+func (s *PostgresStore) ListWorkflows(ctx context.Context, tenantID string) ([]Workflow, error) {
+	rows, err := s.pool.Query(ctx, `SELECT payload FROM afh_workflows WHERE tenant_id=$1 ORDER BY id`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]Workflow, 0)
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var workflow Workflow
+		if err := json.Unmarshal(payload, &workflow); err != nil {
+			return nil, fmt.Errorf("decode stored Workflow: %w", err)
+		}
+		result = append(result, workflow)
+	}
+	return result, rows.Err()
+}
+
 func (s *PostgresStore) ApplyTask(
 	ctx context.Context,
 	tenantID string,
@@ -1209,6 +1360,18 @@ func encodeTaskAndEvent(task Task, event Event) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("encode Event: %w", err)
 	}
 	return taskPayload, eventPayload, nil
+}
+
+func encodeWorkflowAndEvent(workflow Workflow, event WorkflowEvent) ([]byte, []byte, error) {
+	workflowPayload, err := json.Marshal(workflow)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode Workflow: %w", err)
+	}
+	eventPayload, err := json.Marshal(event)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode Workflow event: %w", err)
+	}
+	return workflowPayload, eventPayload, nil
 }
 
 func mapPostgresNotFound(err error) error {

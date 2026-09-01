@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "actions": {},
+  "roles": {
+    "operator": [
+      "agents:read",
+      "agents:write",
+      "tasks:read",
+      "tasks:submit",
+      "tasks:continue",
+      "tasks:cancel",
+      "tasks:reconcile",
+      "artifacts:read"
+    ],
+    "auditor": [
+      "agents:read",
+      "tasks:read",
+      "artifacts:read",
+      "outbox:read"
+    ]
+  },
+  "tenantActions": {}
+}
