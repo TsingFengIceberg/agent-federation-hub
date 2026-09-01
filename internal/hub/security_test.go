@@ -21,3 +21,12 @@ func TestPublicURLPolicyRejectsUnsafeTargets(t *testing.T) {
 		t.Fatalf("public HTTPS URL rejected: %v", err)
 	}
 }
+
+func TestValidateAgentCardURLMatchesRegistrationPolicy(t *testing.T) {
+	if err := ValidateAgentCardURL("https://127.0.0.1/card.json", false); err == nil {
+		t.Fatal("private AgentCard target accepted outside development")
+	}
+	if err := ValidateAgentCardURL("http://127.0.0.1/card.json", true); err != nil {
+		t.Fatalf("local development AgentCard target rejected: %v", err)
+	}
+}

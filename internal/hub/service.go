@@ -155,61 +155,74 @@ func (s *Service) RegisterAgent(ctx context.Context, tenantID string, input Regi
 	return s.RegisterAgentWithPolicy(ctx, tenantID, input, AgentRegistrationPolicy{})
 }
 
-func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, input RegisterAgentInput, policy AgentRegistrationPolicy) (core.Agent, error) {
+// ValidateAgentRegistration performs the complete remote Card and local
+// policy check without mutating the Store. Configuration controllers can use
+// it to preflight every candidate before applying a new snapshot.
+func (s *Service) ValidateAgentRegistration(ctx context.Context, tenantID string, input RegisterAgentInput, policy AgentRegistrationPolicy) (federation.Descriptor, error) {
 	if tenantID == "" {
-		return core.Agent{}, errors.New("tenant ID is required")
+		return federation.Descriptor{}, errors.New("tenant ID is required")
 	}
 	if err := validateHTTPURL(input.CardURL, !s.AllowPrivateAgentURLs); err != nil {
-		return core.Agent{}, fmt.Errorf("card URL: %w", err)
+		return federation.Descriptor{}, fmt.Errorf("card URL: %w", err)
 	}
 	descriptor, err := s.Adapter.Discover(ctx, input.CardURL)
 	if err != nil {
-		return core.Agent{}, err
+		return federation.Descriptor{}, err
 	}
 	if policy.RequiredProtocolVersion != "" && descriptor.ProtocolVersion != policy.RequiredProtocolVersion {
-		return core.Agent{}, fmt.Errorf("remote Agent protocol version %q does not match required %q", descriptor.ProtocolVersion, policy.RequiredProtocolVersion)
+		return federation.Descriptor{}, fmt.Errorf("remote Agent protocol version %q does not match required %q", descriptor.ProtocolVersion, policy.RequiredProtocolVersion)
 	}
 	if policy.RequiredProtocolBinding != "" && descriptor.ProtocolBinding != policy.RequiredProtocolBinding {
-		return core.Agent{}, fmt.Errorf("remote Agent protocol binding %q does not match required %q", descriptor.ProtocolBinding, policy.RequiredProtocolBinding)
+		return federation.Descriptor{}, fmt.Errorf("remote Agent protocol binding %q does not match required %q", descriptor.ProtocolBinding, policy.RequiredProtocolBinding)
 	}
 	if policy.RequiredStreamTransport != "" {
 		stream := strings.ToUpper(strings.TrimSpace(policy.RequiredStreamTransport))
 		binding := strings.ToUpper(strings.ReplaceAll(descriptor.ProtocolBinding, "_", ""))
 		if (binding == "GRPC" && stream != "SERVER_STREAMING" && stream != "GRPC") ||
 			(binding != "GRPC" && stream != "SSE") {
-			return core.Agent{}, fmt.Errorf("unsupported required stream transport %q for binding %q", policy.RequiredStreamTransport, descriptor.ProtocolBinding)
+			return federation.Descriptor{}, fmt.Errorf("unsupported required stream transport %q for binding %q", policy.RequiredStreamTransport, descriptor.ProtocolBinding)
 		}
 	}
 	if policy.RequireStreaming && !descriptor.Streaming {
-		return core.Agent{}, errors.New("remote Agent does not declare streaming support")
+		return federation.Descriptor{}, errors.New("remote Agent does not declare streaming support")
 	}
 	if policy.RequirePushNotifications && !descriptor.PushNotifications {
-		return core.Agent{}, errors.New("remote Agent does not declare Push support")
+		return federation.Descriptor{}, errors.New("remote Agent does not declare Push support")
 	}
 	if missing := missingSkills(policy.RequiredSkills, descriptor.Skills); len(missing) > 0 {
-		return core.Agent{}, fmt.Errorf("remote Agent does not declare required skills: %s", strings.Join(missing, ", "))
+		return federation.Descriptor{}, fmt.Errorf("remote Agent does not declare required skills: %s", strings.Join(missing, ", "))
 	}
 	if disallowed := disallowedSkills(policy.AllowedSkills, descriptor.Skills); len(disallowed) > 0 {
-		return core.Agent{}, fmt.Errorf("remote Agent declares skills outside the allowed policy: %s", strings.Join(disallowed, ", "))
+		return federation.Descriptor{}, fmt.Errorf("remote Agent declares skills outside the allowed policy: %s", strings.Join(disallowed, ", "))
 	}
 	if err := validateAgentEndpoint(descriptor.ProtocolBinding, descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
-		return core.Agent{}, fmt.Errorf("Agent endpoint URL: %w", err)
+		return federation.Descriptor{}, fmt.Errorf("Agent endpoint URL: %w", err)
 	}
 	declared := make(map[string]struct{}, len(descriptor.SecuritySchemes))
 	for _, scheme := range descriptor.SecuritySchemes {
 		declared[scheme] = struct{}{}
 	}
-	credentialEnv := make(map[string]string, len(input.CredentialEnv))
 	for scheme, envName := range input.CredentialEnv {
 		if _, ok := declared[scheme]; !ok {
-			return core.Agent{}, fmt.Errorf("credential scheme %q is not declared by the Agent Card", scheme)
+			return federation.Descriptor{}, fmt.Errorf("credential scheme %q is not declared by the Agent Card", scheme)
 		}
 		if s.Secrets == nil {
-			return core.Agent{}, errors.New("secret provider is required when credentials are configured")
+			return federation.Descriptor{}, errors.New("secret provider is required when credentials are configured")
 		}
 		if err := s.Secrets.ValidateReference(envName); err != nil {
-			return core.Agent{}, fmt.Errorf("credential reference %q: %w", envName, err)
+			return federation.Descriptor{}, fmt.Errorf("credential reference %q: %w", envName, err)
 		}
+	}
+	return descriptor, nil
+}
+
+func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, input RegisterAgentInput, policy AgentRegistrationPolicy) (core.Agent, error) {
+	descriptor, err := s.ValidateAgentRegistration(ctx, tenantID, input, policy)
+	if err != nil {
+		return core.Agent{}, err
+	}
+	credentialEnv := make(map[string]string, len(input.CredentialEnv))
+	for scheme, envName := range input.CredentialEnv {
 		credentialEnv[scheme] = envName
 	}
 	now := s.now()

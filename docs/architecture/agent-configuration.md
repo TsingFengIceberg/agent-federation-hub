@@ -1,6 +1,6 @@
 # Agent Configuration
 
-> **Status**: implemented initial loader and startup registration<br>
+> **Status**: implemented loader, startup registration, and opt-in atomic reload<br>
 > **Evidence**: local unit tests and `go test ./...`<br>
 > **Scope**: operator-owned remote Agent registration; provider behavior remains defined by A2A AgentCard
 
@@ -48,13 +48,18 @@ agent_config.yaml
     -> A2A Task submission and reconciliation
 ```
 
-The configuration file still loads once during process startup. The authenticated
-`POST /v1/agents/{id}/refresh` operation provides explicit runtime Card refresh
-and health marking without changing the operator-owned credential references.
+The configuration file loads during process startup. The optional
+`--agent-config-reload-interval` enables atomic polling-based reconciliation;
+an invalid or unapplied candidate retains the last accepted snapshot. The
+authenticated `POST /v1/agents/{id}/refresh` operation provides explicit runtime
+Card refresh and health marking without changing the operator-owned credential
+references.
 Task callers may use `skill` instead of `agentId`; the Hub chooses a healthy
 tenant-local registration whose Card declares that skill. A future scheduled
-controller may add automatic refresh, but must preserve the same AgentCard
-authority and tenant/credential boundaries.
+controller may add richer Registry reconciliation, but must preserve the same
+AgentCard authority and tenant/credential boundaries. Removed or disabled
+entries are retained as `STALE` records rather than deleted, preserving
+historical Task associations.
 
 ## Local Setup
 
@@ -63,7 +68,7 @@ authority and tenant/credential boundaries.
 2. Copy `agent_config.example.yaml` to `agent_config.yaml`.
 3. Set the provider `card_url`, tenant, required skill, and credential
    reference. Keep `enabled: false` until the provider passes the A2A smoke
-   test; then enable it and restart the Hub.
+   test; then enable it and restart the Hub, or use the opt-in reload flag.
 4. Add the referenced secret name to the operator credential allowlist and put
    its value in the local environment.
 5. Start the Hub with `--agent-config agent_config.yaml` (the default path) and

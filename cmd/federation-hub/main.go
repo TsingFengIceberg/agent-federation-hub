@@ -40,6 +40,7 @@ func main() {
 	postgresDSNEnv := flag.String("postgres-dsn-env", "AFH_POSTGRES_DSN", "environment variable containing the PostgreSQL DSN")
 	publicBaseURL := flag.String("public-base-url", "", "public HTTPS base URL used for optional A2A Push callbacks")
 	agentConfigPath := flag.String("agent-config", "agent_config.yaml", "YAML file containing operator-owned remote Agent registrations")
+	agentConfigReloadInterval := flag.Duration("agent-config-reload-interval", 0, "optional interval for atomically reloading Agent registrations; zero disables")
 	allowPrivateAgentURLs := flag.Bool("allow-private-agent-urls", false, "allow HTTP or private Agent Card URLs for local development")
 	credentialEnvAllowlist := flag.String("credential-env-allowlist", "", "comma-separated credential environment variable names tenants may reference")
 	authMode := flag.String("auth-mode", "oidc", "inbound authentication mode: oidc, mtls, oidc-or-mtls, jwt-static, or development")
@@ -409,38 +410,30 @@ func main() {
 		Artifacts:             artifacts,
 	}
 	configuredTenants := make(map[string]struct{})
+	var configuredTenantsMu sync.RWMutex
+	managedConfiguredAgents := make(map[string]struct{})
+	var agentConfigRuntime *agentconfig.Runtime
 	if *agentConfigPath != "" {
-		configuredAgents, configErr := agentconfig.LoadFile(*agentConfigPath)
-		if configErr != nil {
-			if !errors.Is(configErr, os.ErrNotExist) {
-				log.Fatal(configErr)
+		_, configStatErr := os.Stat(*agentConfigPath)
+		if configStatErr != nil {
+			if !errors.Is(configStatErr, os.ErrNotExist) {
+				log.Fatalf("stat Agent configuration %q: %v", *agentConfigPath, configStatErr)
 			}
 			log.Printf("Agent configuration %q does not exist; continuing without configured Agents", *agentConfigPath)
 		} else {
-			for _, registration := range configuredAgents.EnabledAgents() {
-				configuredTenants[registration.TenantID] = struct{}{}
-				if registration.AllowsPrivateURLs(configuredAgents.Defaults) && !*allowPrivateAgentURLs {
-					log.Fatalf("configured Agent %q allows private URLs; pass --allow-private-agent-urls for local development", registration.ID)
-				}
-				registered, registerErr := service.RegisterAgentWithPolicy(
-					context.Background(), registration.TenantID,
-					hub.RegisterAgentInput{ID: registration.ID, CardURL: registration.CardURL, CredentialEnv: registration.CredentialEnv},
-					registration.RegistrationPolicy(configuredAgents.Defaults),
-				)
-				if registerErr != nil {
-					log.Fatalf("register configured Agent %q: %v", registration.ID, registerErr)
-				}
-				if externalRegistry != nil {
-					if err := externalRegistry.Register(context.Background(), registered); err != nil {
-						log.Fatalf("publish Agent %q to external Registry: %v", registration.ID, err)
-					}
-				}
-				log.Printf("registered configured Agent %q (%s)", registered.ID, registered.Name)
+			agentConfigRuntime, err = agentconfig.NewRuntime(context.Background(), *agentConfigPath, func(ctx context.Context, config agentconfig.File, first bool) error {
+				return reconcileConfiguredAgents(ctx, service, externalRegistry, config, configuredTenants, &configuredTenantsMu, managedConfiguredAgents, *allowPrivateAgentURLs, first)
+			})
+			if err != nil {
+				log.Fatal(err)
 			}
+			agentConfigRuntime.SetErrorReporter(func(reloadErr error) {
+				log.Printf("Agent configuration reload failed; retaining last accepted snapshot: %v", reloadErr)
+			})
 		}
 	}
 	if externalRegistry != nil {
-		for _, tenantID := range registryTenants(*registryImportTenants, configuredTenants) {
+		for _, tenantID := range registryTenants(*registryImportTenants, snapshotConfiguredTenants(configuredTenants, &configuredTenantsMu)) {
 			if err := importRegistryAgents(context.Background(), externalRegistry, service, tenantID, *registryURL); err != nil {
 				log.Printf("external Registry import for tenant %q failed; keeping local cache: %v", tenantID, err)
 			}
@@ -543,6 +536,9 @@ func main() {
 			log.Printf("trust bundle reload failed; retaining last valid snapshot: %v", reloadErr)
 		})
 	}
+	if agentConfigRuntime != nil && *agentConfigReloadInterval > 0 {
+		go agentConfigRuntime.Watch(ctx, *agentConfigReloadInterval)
+	}
 	resolvedWorkerID := *workerID
 	if resolvedWorkerID == "" {
 		resolvedWorkerID = "hub-" + core.NewID()
@@ -563,7 +559,7 @@ func main() {
 				case <-registryCtx.Done():
 					return
 				case <-ticker.C:
-					for _, tenantID := range registryTenants(*registryImportTenants, configuredTenants) {
+					for _, tenantID := range registryTenants(*registryImportTenants, snapshotConfiguredTenants(configuredTenants, &configuredTenantsMu)) {
 						if err := importRegistryAgents(registryCtx, externalRegistry, service, tenantID, *registryURL); err != nil {
 							log.Printf("external Registry sync for tenant %q failed; retaining local cache: %v", tenantID, err)
 						}
@@ -690,6 +686,19 @@ func registryTenants(explicit string, configured map[string]struct{}) []string {
 	}
 	sort.Strings(tenants)
 	return tenants
+}
+
+func snapshotConfiguredTenants(configured map[string]struct{}, mu *sync.RWMutex) map[string]struct{} {
+	if mu == nil {
+		return configured
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	snapshot := make(map[string]struct{}, len(configured))
+	for tenant := range configured {
+		snapshot[tenant] = struct{}{}
+	}
+	return snapshot
 }
 
 func importRegistryAgents(ctx context.Context, external registry.Client, service *hub.Service, tenantID, registryEndpoint string) error {

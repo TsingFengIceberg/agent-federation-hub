@@ -39,6 +39,13 @@ func validateHTTPURL(raw string, publicOnly bool) error {
 	return nil
 }
 
+// ValidateAgentCardURL exposes the same URL policy used by registration and
+// routing to admission tooling. Private HTTP/IP targets are accepted only when
+// the caller explicitly enables local development mode.
+func ValidateAgentCardURL(raw string, allowPrivate bool) error {
+	return validateHTTPURL(raw, !allowPrivate)
+}
+
 func validateAgentEndpoint(binding, raw string, publicOnly bool) error {
 	if strings.EqualFold(strings.ReplaceAll(binding, "_", ""), "GRPC") {
 		value := strings.TrimSpace(raw)
