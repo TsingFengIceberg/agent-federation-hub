@@ -65,6 +65,19 @@
     {"action": "task.events", "method": "GET", "path": "/v1/tasks/{taskID}/events", "scope": "tasks:read"},
     {"action": "task.cancel", "method": "POST", "path": "/v1/tasks/{taskID}/cancel", "scope": "tasks:cancel"},
     {"action": "task.reconcile", "method": "POST", "path": "/v1/tasks/{taskID}/reconcile", "scope": "tasks:reconcile"},
+    {"action": "workflow.create", "method": "POST", "path": "/v1/workflows", "scope": "workflows:write"},
+    {"action": "workflow.list", "method": "GET", "path": "/v1/workflows", "scope": "workflows:read"},
+    {"action": "workflow.read", "method": "GET", "path": "/v1/workflows/{workflowID}", "scope": "workflows:read"},
+    {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/reconcile", "scope": "workflows:control"},
+    {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/continue", "scope": "workflows:control"},
+    {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/pause", "scope": "workflows:control"},
+    {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/resume", "scope": "workflows:control"},
+    {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/cancel", "scope": "workflows:control"},
+    {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/compensate", "scope": "workflows:control"},
+    {"action": "worker.read", "method": "GET", "path": "/v1/workers", "scope": "workers:read"},
+    {"action": "worker.control", "method": "POST", "path": "/v1/workers/pause", "scope": "workers:control"},
+    {"action": "worker.control", "method": "POST", "path": "/v1/workers/resume", "scope": "workers:control"},
+    {"action": "worker.control", "method": "POST", "path": "/v1/workers/drain", "scope": "workers:control"},
     {"action": "artifact.read", "method": "GET", "path": "/v1/artifacts/{artifactID}", "scope": "artifacts:read"}
   ]
 }

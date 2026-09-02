@@ -33,6 +33,10 @@ network availability, provider quotas, model output wording, or paid APIs. The
 live-provider layer is opt-in. It proves integration behavior but is not a stable
 conformance oracle.
 
+OTLP trace export is disabled unless `--otlp-endpoint` is configured. HTTPS is
+required by default; `--otlp-allow-http` is an explicit local-development opt-in
+for a non-TLS collector and must not be used as a production security control.
+
 The local control-plane smoke uses `cmd/reference-registry` and
 `cmd/reference-gateway`. Both are intentionally in-memory HTTPS reference
 servers for contract testing, not production Registry or Gateway deployments.

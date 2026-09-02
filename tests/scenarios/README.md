@@ -44,3 +44,9 @@ GO_BIN=/path/to/go tests/scenarios/run-matrix.sh
 The runner intentionally reports scenarios marked `external` without
 inventing fake business logic. Those entries become runnable only when a
 standards-compatible independent Provider and its adapter are supplied.
+
+Workflow management API coverage is included in the Hub HTTP contract tests:
+creation, tenant-scoped listing/reading, reconciliation, continuation,
+compensation, and operator pause/resume/cancel controls. Task priorities are
+covered by Journal lease-order tests; PostgreSQL uses the same persisted JSON
+contract and ordering rule.

@@ -32,6 +32,12 @@ The tested Binding matrix is recorded in [`profile-matrix.json`](profile-matrix.
 Repository-owned lifecycle and recovery tests are complementary evidence, not a
 substitute for a future protocol-aligned TCK run.
 
+The repository-owned JSON-RPC fixture also contains a narrow compatibility shim
+for the pinned TCK's Push CRUD client, which sends `task_id`; it rewrites only
+that Push parameter to the canonical A2A `taskId` field before SDK decoding.
+This shim is test-fixture behavior and is not part of the Hub's provider-facing
+wire contract.
+
 Run the reproducible three-Binding matrix with a pinned TCK checkout:
 
 ```bash

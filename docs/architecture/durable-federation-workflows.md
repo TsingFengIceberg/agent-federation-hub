@@ -34,6 +34,8 @@ is rejected instead of silently falling back to volatile state.
 - `PARTIALLY_FAILED` preserves completed branches alongside failed branches.
 - `COMPENSATING` records explicit compensating child Tasks in progress.
 - `COMPENSATED` means all requested compensations completed.
+- `PAUSED` means Hub reconciliation and continuation are paused by an
+  operator; Provider-owned execution is not forcibly frozen.
 
 `ReconcileWorkflow` refreshes child Tasks by their preserved remote Task and
 Context IDs. It may be called after process restart and never resubmits a child
@@ -57,6 +59,8 @@ partial failure, and tenant isolation in
 ## Remaining qualification
 
 The current implementation does not yet provide a workflow definition
-language, operator pause/drain, priority scheduling, a managed workflow
-store, or domain-specific side-effect compensation guarantees. Those require
-separate ADRs and production drills before a production SLO claim.
+language, global worker drain, a managed workflow store, or domain-specific
+side-effect compensation guarantees. Workflow definitions, operator
+pause/resume/cancel controls, and bounded priority scheduling are implemented
+as a repository-owned API, but still require production drills before a
+production SLO claim.

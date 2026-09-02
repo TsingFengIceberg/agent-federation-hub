@@ -53,6 +53,11 @@ agents:
       # any additional skills advertised by this provider.
       allowed_skills:
         - competitive-analysis
+      # Optional URI-based A2A extension admission policy. Required extensions
+      # must be advertised by the remote Card; allow-listing prevents silently
+      # accepting extensions the Hub has not approved.
+      required_extensions: []
+      allowed_extensions: []
 
     # Values are SecretProvider references, never literal credentials. The
     # map key must exactly match a security scheme declared by the Agent Card.

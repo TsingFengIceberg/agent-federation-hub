@@ -14,12 +14,12 @@
       "streamTransport": "SSE",
       "sutBindingFlag": "jsonrpc",
       "status": "accepted-with-waivers",
-      "tckMustPassed": 67,
-      "tckMustSkipped": 25,
+      "tckMustPassed": 76,
+      "tckMustSkipped": 16,
       "tckMustNotTested": 22,
       "tckMustFailed": 0,
-      "tckTransportPassed": 79,
-      "tckTransportSkipped": 15,
+      "tckTransportPassed": 87,
+      "tckTransportSkipped": 7,
       "tckTransportFailed": 0
     },
     {
@@ -28,12 +28,12 @@
       "streamTransport": "SSE",
       "sutBindingFlag": "http_json",
       "status": "verified-local-with-skips",
-      "tckMustPassed": 62,
-      "tckMustSkipped": 29,
+      "tckMustPassed": 71,
+      "tckMustSkipped": 20,
       "tckMustNotTested": 23,
       "tckMustFailed": 0,
-      "tckTransportPassed": 73,
-      "tckTransportSkipped": 14,
+      "tckTransportPassed": 81,
+      "tckTransportSkipped": 6,
       "tckTransportFailed": 0
     },
     {
@@ -42,12 +42,12 @@
       "streamTransport": "server-streaming",
       "sutBindingFlag": "grpc",
       "status": "verified-local-with-skips",
-      "tckMustPassed": 50,
-      "tckMustSkipped": 31,
+      "tckMustPassed": 60,
+      "tckMustSkipped": 21,
       "tckMustNotTested": 33,
       "tckMustFailed": 0,
-      "tckTransportPassed": 52,
-      "tckTransportSkipped": 13,
+      "tckTransportPassed": 61,
+      "tckTransportSkipped": 4,
       "tckTransportFailed": 0
     }
   ]

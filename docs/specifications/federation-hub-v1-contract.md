@@ -52,6 +52,12 @@ snapshot, indexes declared Skills, and verifies reachability separately. A
 Card change, failed refresh, tenant mismatch, or revoked trust can remove an
 Agent from routing without changing Provider code.
 
+AgentCard-declared A2A extension URIs are preserved in the local snapshot and
+may be constrained by required/allowed extension policy. The Hub rejects an
+Agent that advertises a required extension outside the configured policy; it
+does not infer extension semantics or activate an extension without an
+explicitly qualified adapter profile.
+
 The Hub may route directly to the declared A2A endpoint or through an
 operator-selected Gateway. Central Gateway traversal is a policy decision,
 not a protocol requirement.
@@ -83,6 +89,15 @@ The Hub exposes the following stable management operations:
 | read/follow Events | `GET /v1/tasks/{taskID}/events` | `tasks:read` |
 | cancel Task | `POST /v1/tasks/{taskID}/cancel` | `tasks:cancel` |
 | reconcile Task | `POST /v1/tasks/{taskID}/reconcile` | `tasks:reconcile` |
+| create Workflow | `POST /v1/workflows` | `workflows:write` |
+| list Workflows | `GET /v1/workflows` | `workflows:read` |
+| read Workflow | `GET /v1/workflows/{workflowID}` | `workflows:read` |
+| reconcile Workflow | `POST /v1/workflows/{workflowID}/reconcile` | `workflows:control` |
+| continue Workflow | `POST /v1/workflows/{workflowID}/continue` | `workflows:control` |
+| pause/resume/cancel Workflow | `POST /v1/workflows/{workflowID}/{pause\|resume\|cancel}` | `workflows:control` |
+| compensate Workflow | `POST /v1/workflows/{workflowID}/compensate` | `workflows:control` |
+| read worker mode | `GET /v1/workers` | `workers:read` |
+| pause/resume/drain workers | `POST /v1/workers/{pause\|resume\|drain}` | `workers:control` |
 | receive Push | `POST /v1/tasks/{taskID}/push` | callback credential |
 | read Artifact | `GET /v1/artifacts/{artifactID}[/{content}]` | `artifacts:read` |
 
@@ -101,6 +116,14 @@ Delivery evidence is separate from Task state:
 Polling, SSE, Push, and reconnect are convergence mechanisms. At-least-once
 delivery and duplicate suppression are supported; exactly-once execution or
 arbitrary external side-effect rollback is explicitly not promised.
+
+Workflow control is an operator-visible coordination boundary. Pausing stops
+Hub reconciliation and continuation for the aggregate but cannot freeze a
+Provider's already-running private execution. Cancel requests A2A cancellation
+for each known non-terminal child and records the aggregate as canceled;
+unknown or already-completed provider side effects remain outside the Hub's
+rollback guarantee. Task `priority` is an integer from `-1000` to `1000` and
+is used only for Hub-owned recovery scheduling.
 
 ## Artifact and Event Contract
 

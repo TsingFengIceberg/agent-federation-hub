@@ -13,6 +13,9 @@
       "requiredScopes": []
     }
   },
+  "cardKeys": {
+    "partner-card-2026": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAGACEAhRye++67QpxEY88Cqyv3N23bbW0PxG8RqG1zh4=\n-----END PUBLIC KEY-----"
+  },
   "workloads": {
     "spiffe://partner.example/ns/prod/sa/competitive-analysis": {
       "subject": "competitive-analysis-agent",

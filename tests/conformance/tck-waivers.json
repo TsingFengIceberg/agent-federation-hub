@@ -10,15 +10,9 @@
       "evidence": "docs/adr/0005-federated-workload-trust.md"
     },
     {
-      "id": "SUT-PUSH",
-      "scope": "push-notifications",
-      "reason": "The TCK fixture does not advertise a remote Push sender; the pinned Go SDK sender and Hub receiver are covered separately by the repository-owned Push smoke.",
-      "evidence": "tests/hub/run-push-smoke.sh"
-    },
-    {
       "id": "PROFILE-UNTESTED-CAPABILITIES",
-      "scope": "card-signing,auth,push-tck",
-      "reason": "The owned SUT now runs JSON-RPC+SSE, HTTP+JSON+SSE, and gRPC server-streaming profiles; signed-card trust distribution, production authentication, and Push scenarios in the TCK fixture remain outside this executable profile.",
+      "scope": "card-signing,auth",
+      "reason": "The owned SUT now runs JSON-RPC+SSE, HTTP+JSON+SSE, and gRPC server-streaming profiles; signed-card trust distribution and production authentication remain outside this executable profile. Push CRUD and delivery scenarios pass in the pinned local TCK fixture.",
       "evidence": "docs/architecture/a2a-v1-go-python-decision-gate.md"
     }
   ]

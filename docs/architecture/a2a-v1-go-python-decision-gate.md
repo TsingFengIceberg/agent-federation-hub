@@ -47,7 +47,7 @@ The raw failure counts must not be treated as 29 independent Go SDK defects. Thr
 
 ### Go TCK fixture gaps
 
-The repository-owned SUT covers deterministic direct Message, Task, text/raw/URL/data Artifact, chunked SSE, `INPUT_REQUIRED`, cancellation, resubscription, rejection, version validation, history limits, gRPC server-streaming, and binding-specific error behavior. The JSON-RPC/SSE, HTTP+JSON, and gRPC MUST runs exit successfully against the aligned v1.0.0 baseline, while signed-card trust distribution, production authentication, and complete TCK Push coverage remain explicit waivers. The separate Push smoke validates the provider SDK sender against the Hub receiver. These results are evidence with explicit waivers, not a claim of complete conformance.
+The repository-owned SUT covers deterministic direct Message, Task, text/raw/URL/data Artifact, chunked SSE, `INPUT_REQUIRED`, cancellation, resubscription, rejection, version validation, history limits, gRPC server-streaming, binding-specific error behavior, and the pinned fixture's Push CRUD/delivery scenarios. The JSON-RPC/SSE, HTTP+JSON, and gRPC MUST runs exit successfully against the aligned v1.0.0 baseline, while signed-card trust distribution and production authentication remain explicit waivers. The separate Push smoke validates the provider SDK sender against the Hub receiver. These results are evidence with explicit waivers, not a claim of complete conformance.
 
 The earlier external Go TCK fixture advertised its gRPC interface as
 `http://localhost:9998`, while that TCK passed the complete value directly to

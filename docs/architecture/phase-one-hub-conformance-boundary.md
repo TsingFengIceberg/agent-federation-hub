@@ -23,6 +23,10 @@ POST /v1/tasks/{id}/cancel
 POST /v1/tasks/{id}/messages
 POST /v1/tasks/{id}/reconcile
 POST /v1/tasks/{id}/push
+POST /v1/workflows
+GET  /v1/workflows
+GET  /v1/workflows/{workflowID}
+POST /v1/workflows/{workflowID}/reconcile|continue|pause|resume|cancel|compensate
 ```
 
 Registration resolves an Agent Card and accepts only the selected A2A `1.0`
@@ -56,7 +60,7 @@ unhealthy until a later refresh succeeds.
 
 | Area | Current executable evidence | Not yet claimed |
 |---|---|---|
-| A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, opt-in HTTP+JSON and gRPC adapter paths, gRPC Bearer metadata regression, signed-card round-trip, SDK `v2.5.0`, repository-owned three-Binding TCK SUT, and provider-SDK Push sender/Hub receiver smoke | extensions, signed/extended Card policy, production authentication and complete TCK Push coverage |
+| A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, opt-in HTTP+JSON and gRPC adapter paths, gRPC Bearer metadata regression, signed-card round-trip, URI-based extension admission policy, SDK `v2.5.0`, repository-owned three-Binding TCK SUT, complete pinned-fixture Push CRUD/delivery scenarios, and provider-SDK Push sender/Hub receiver smoke | extension activation semantics, signed/extended Card trust distribution, production authentication, and managed sender/receiver qualification |
 | Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event/outbox transactions, revisions, schema checksum ledger, two-pool lease tests, Outbox admin replay/retention | Managed database qualification, HA, encrypted backup/PITR, and cross-region replication |
 | Recovery | Known-ID disconnect uses `GetTask`; unknown-ID send becomes ambiguous | Automated ambiguous-operation resolution or exactly-once execution |
 | Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, versioned Trust Bundle reload/rollback checks, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, local and central audit retry/outage tests | Production partner IdP/CA/PDP rollout, protected trust-bundle distribution, automated key management, consent, and operational SLO qualification |
@@ -65,7 +69,7 @@ unhealthy until a later refresh succeeds.
 | Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics; filesystem/S3 object storage, MIME/size/quota controls, ClamAV quarantine, authenticated retrieval, expiry leases | Encryption policy, DLP/legal hold, backup/restore, production throughput |
 | Errors | Sanitized transport/auth/authz/validation/resource/state/protocol categories | Complete binding-specific status equivalence and tenant policy details |
 | Registry | Durable built-in Agent Card registration by URL, skill selection, explicit Card refresh and health status; HTTPS external Registry publication/import, stale-cache marking, bounded reads, and best-effort periodic sync are covered by a local reference smoke | Nacos/ARD production adapter, Card signature trust distribution, conflict policy, and managed Registry health/SLO qualification |
-| Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance; durable Outbox worker with CloudEvents sink and admin replay/retention | Priority, preemption, operator pause/drain, broker partitioning and managed event-bus operations |
+| Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance; durable Outbox worker with CloudEvents sink and admin replay/retention; bounded Task priority, Workflow pause/resume/cancel, and process-local worker pause/resume/drain controls | Cross-instance preemption, broker partitioning and managed event-bus operations |
 | Gateway | Direct A2A calls behind the federation Adapter interface; HTTPS external Gateway proxy with CA, optional mTLS client credentials, bounded safe retries, circuit breaking, Bearer configuration, Send/Get/Cancel/Subscribe forwarding, and explicit managed selection are covered by a local reference smoke | Managed agentgateway route, policy authoring, rate limiting, egress controls, and production Gateway SLO qualification |
 | AAMP | AAMP 1.1 lifecycle/result/attachment mapper into the common model | SMTP/JMAP client, discovery, sender policy, pairing, mailbox credentials |
 
@@ -111,11 +115,14 @@ evidence status do not drift silently.
 The TCK is now aligned to the selected normative A2A `v1.0.0` source commit
 `173695755607e884aa9acf8ce4feed90e32727a1` and is checked by
 `tests/conformance/check-pins.sh`. At that pinned checkout, the repository-owned
-SUT exits successfully for JSON-RPC (`81 passed, 154 skipped, 30 deselected`),
-HTTP+JSON (`73 passed, 162 skipped, 30 deselected`), and gRPC (`62 passed, 173
-skipped, 30 deselected`). This is still not a complete multi-binding claim:
-authentication, Push sender, signed-card, and other requirements remain
-explicit waivers. The
+SUT exits successfully for JSON-RPC (`89 passed, 151 skipped, 30 deselected`),
+HTTP+JSON (`81 passed, 154 skipped, 30 deselected`), and gRPC (`71 passed, 164
+skipped, 30 deselected`). The JSON-RPC fixture accepts the pinned TCK client's
+legacy `task_id` spelling at its fixture boundary and normalizes it to the
+canonical `taskId` field before the Go SDK handler; the Hub adapter does not
+accept or emit this alias. This is still not a complete multi-binding claim:
+authentication, signed-card, and other requirements remain explicit waivers;
+the pinned fixture's Push CRUD and delivery requirements now pass. The
 newer A2A mainline commit remains recorded as `latestProtocolCandidateCommit`
 for a separately gated upgrade.
 
