@@ -29,6 +29,8 @@ type Policy struct {
 	Profiles                []a2afederation.BindingProfile
 	RequiredSkills          []string
 	AllowedSkills           []string
+	RequiredExtensions      []string
+	AllowedExtensions       []string
 	RequiredSecuritySchemes []string
 	RequireStreaming        bool
 	RequirePush             bool
@@ -95,7 +97,7 @@ func Run(ctx context.Context, adapter federation.Adapter, cardURL string, policy
 // configuration validation, CLI tooling, and unit tests share identical
 // policy semantics without performing a second network request.
 func Evaluate(descriptor federation.Descriptor, policy Policy) []Check {
-	checks := make([]Check, 0, 7)
+	checks := make([]Check, 0, 8)
 	checks = append(checks, Check{ID: "agent-card-discovery", Status: CheckPassed, Message: "AgentCard was discovered and parsed"})
 	if len(policy.Profiles) == 0 {
 		checks = append(checks, Check{ID: "a2a-profile", Status: CheckSkipped, Message: "no local A2A Profile constraint was requested"})
@@ -126,6 +128,26 @@ func Evaluate(descriptor federation.Descriptor, policy Policy) []Check {
 			checks = append(checks, Check{ID: "skills", Status: CheckFailed, Message: "skills outside allow-list: " + strings.Join(disallowed, ", ")})
 		default:
 			checks = append(checks, Check{ID: "skills", Status: CheckPassed, Message: "declared skills satisfy local policy"})
+		}
+	}
+	declaredExtensions := make([]string, 0, len(descriptor.Extensions))
+	for _, extension := range descriptor.Extensions {
+		if strings.TrimSpace(extension.URI) != "" {
+			declaredExtensions = append(declaredExtensions, extension.URI)
+		}
+	}
+	if len(policy.RequiredExtensions) == 0 && len(policy.AllowedExtensions) == 0 {
+		checks = append(checks, Check{ID: "extensions", Status: CheckSkipped, Message: "no extension constraint was requested"})
+	} else {
+		missing := missingStrings(policy.RequiredExtensions, declaredExtensions)
+		disallowed := disallowedStrings(policy.AllowedExtensions, declaredExtensions)
+		switch {
+		case len(missing) > 0:
+			checks = append(checks, Check{ID: "extensions", Status: CheckFailed, Message: "required extensions missing: " + strings.Join(missing, ", ")})
+		case len(disallowed) > 0:
+			checks = append(checks, Check{ID: "extensions", Status: CheckFailed, Message: "extensions outside allow-list: " + strings.Join(disallowed, ", ")})
+		default:
+			checks = append(checks, Check{ID: "extensions", Status: CheckPassed, Message: "declared extensions satisfy local policy"})
 		}
 	}
 	if len(policy.RequiredSecuritySchemes) == 0 {

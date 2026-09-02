@@ -46,21 +46,27 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 type Action string
 
 const (
-	ActionAgentRegister  Action = "agent.register"
-	ActionAgentList      Action = "agent.list"
-	ActionAgentRefresh   Action = "agent.refresh"
-	ActionOutboxList     Action = "outbox.list"
-	ActionOutboxReplay   Action = "outbox.replay"
-	ActionOutboxPurge    Action = "outbox.purge"
-	ActionTaskSubmit     Action = "task.submit"
-	ActionTaskContinue   Action = "task.continue"
-	ActionTaskRead       Action = "task.read"
-	ActionTaskEvents     Action = "task.events"
-	ActionTaskCancel     Action = "task.cancel"
-	ActionTaskReconcile  Action = "task.reconcile"
-	ActionPushConfigure  Action = "push.configure"
-	ActionSecurityRevoke Action = "security.revoke"
-	ActionArtifactRead   Action = "artifact.read"
+	ActionAgentRegister   Action = "agent.register"
+	ActionAgentList       Action = "agent.list"
+	ActionAgentRefresh    Action = "agent.refresh"
+	ActionOutboxList      Action = "outbox.list"
+	ActionOutboxReplay    Action = "outbox.replay"
+	ActionOutboxPurge     Action = "outbox.purge"
+	ActionTaskSubmit      Action = "task.submit"
+	ActionTaskContinue    Action = "task.continue"
+	ActionTaskRead        Action = "task.read"
+	ActionTaskEvents      Action = "task.events"
+	ActionTaskCancel      Action = "task.cancel"
+	ActionTaskReconcile   Action = "task.reconcile"
+	ActionPushConfigure   Action = "push.configure"
+	ActionSecurityRevoke  Action = "security.revoke"
+	ActionArtifactRead    Action = "artifact.read"
+	ActionWorkflowCreate  Action = "workflow.create"
+	ActionWorkflowList    Action = "workflow.list"
+	ActionWorkflowRead    Action = "workflow.read"
+	ActionWorkflowControl Action = "workflow.control"
+	ActionWorkerRead      Action = "worker.read"
+	ActionWorkerControl   Action = "worker.control"
 )
 
 type Request struct {
@@ -80,21 +86,27 @@ type ScopeAuthorizer struct {
 
 func DefaultScopeAuthorizer() *ScopeAuthorizer {
 	return &ScopeAuthorizer{Required: map[Action]string{
-		ActionAgentRegister:  "agents:write",
-		ActionAgentList:      "agents:read",
-		ActionAgentRefresh:   "agents:write",
-		ActionOutboxList:     "outbox:read",
-		ActionOutboxReplay:   "outbox:write",
-		ActionOutboxPurge:    "outbox:write",
-		ActionTaskSubmit:     "tasks:submit",
-		ActionTaskContinue:   "tasks:continue",
-		ActionTaskRead:       "tasks:read",
-		ActionTaskEvents:     "tasks:read",
-		ActionTaskCancel:     "tasks:cancel",
-		ActionTaskReconcile:  "tasks:reconcile",
-		ActionPushConfigure:  "push:configure",
-		ActionSecurityRevoke: "security:revoke",
-		ActionArtifactRead:   "artifacts:read",
+		ActionAgentRegister:   "agents:write",
+		ActionAgentList:       "agents:read",
+		ActionAgentRefresh:    "agents:write",
+		ActionOutboxList:      "outbox:read",
+		ActionOutboxReplay:    "outbox:write",
+		ActionOutboxPurge:     "outbox:write",
+		ActionTaskSubmit:      "tasks:submit",
+		ActionTaskContinue:    "tasks:continue",
+		ActionTaskRead:        "tasks:read",
+		ActionTaskEvents:      "tasks:read",
+		ActionTaskCancel:      "tasks:cancel",
+		ActionTaskReconcile:   "tasks:reconcile",
+		ActionPushConfigure:   "push:configure",
+		ActionSecurityRevoke:  "security:revoke",
+		ActionArtifactRead:    "artifacts:read",
+		ActionWorkflowCreate:  "workflows:write",
+		ActionWorkflowList:    "workflows:read",
+		ActionWorkflowRead:    "workflows:read",
+		ActionWorkflowControl: "workflows:control",
+		ActionWorkerRead:      "workers:read",
+		ActionWorkerControl:   "workers:control",
 	}, RoleScopes: make(map[string]map[string]struct{}), TenantRequired: make(map[string]map[Action]string)}
 }
 

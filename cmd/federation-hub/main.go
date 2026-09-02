@@ -25,6 +25,8 @@ import (
 	a2afederation "github.com/TsingFengIceberg/agent-federation-hub/internal/federation/a2a"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/gateway"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/hub"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/observability"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/orchestration"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/registry"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/transport"
@@ -90,6 +92,8 @@ func main() {
 	requireControlPlaneReady := flag.Bool("require-control-plane-ready", false, "fail /readyz when configured external Registry or Gateway is unavailable")
 	reconcileInterval := flag.Duration("reconcile-interval", 30*time.Second, "interval for polling recoverable remote Tasks")
 	workerID := flag.String("worker-id", "", "unique background worker identity; generated when empty")
+	workerControlScope := flag.String("worker-control-scope", "", "optional durable worker pause/resume/drain scope shared by Hub instances")
+	workerControlRefresh := flag.Duration("worker-control-refresh", 5*time.Second, "poll interval for durable worker control state; zero disables polling")
 	leaseDuration := flag.Duration("worker-lease-duration", 30*time.Second, "background reconciliation lease duration")
 	artifactBackend := flag.String("artifact-storage", "filesystem", "Artifact object backend: filesystem or s3")
 	artifactRoot := flag.String("artifact-root", "var/artifacts", "filesystem Artifact object root")
@@ -108,6 +112,12 @@ func main() {
 	artifactMIMEAllowlist := flag.String("artifact-mime-allowlist", "text/*,application/json,application/pdf,application/octet-stream,application/zip,image/*,audio/*,video/*", "comma-separated detected MIME allowlist")
 	artifactRequireClean := flag.Bool("artifact-require-clean", false, "require a clean malware scan before Artifact availability")
 	artifactScanner := flag.String("artifact-scanner", "none", "Artifact malware scanner: none or clamav")
+	artifactEncryptionKeyRef := flag.String("artifact-encryption-key-ref", "", "SecretProvider reference for the Artifact envelope-encryption key")
+	artifactEncryptionKeyID := flag.String("artifact-encryption-key-id", "", "key ID stored in the Artifact encryption envelope")
+	workflowInputStorage := flag.String("workflow-input-storage", "memory", "Workflow input vault backend: memory or file")
+	workflowInputRoot := flag.String("workflow-input-root", "var/workflow-inputs", "encrypted Workflow input vault directory")
+	workflowInputKeyRef := flag.String("workflow-input-key-ref", "", "SecretProvider reference for the Workflow input encryption key")
+	workflowInputKeyID := flag.String("workflow-input-key-id", "", "key ID stored in the Workflow input envelope")
 	artifactClamAVNetwork := flag.String("artifact-clamav-network", "tcp", "ClamAV network: tcp or unix")
 	artifactClamAVAddress := flag.String("artifact-clamav-address", "", "ClamAV daemon address")
 	allowPrivateArtifactURIs := flag.Bool("allow-private-artifact-urls", false, "allow private HTTPS Artifact source URLs for local development")
@@ -127,6 +137,9 @@ func main() {
 	outboxTokenReference := flag.String("outbox-token-ref", "", "optional SecretProvider reference for the outbox endpoint Bearer token")
 	outboxMaxAttempts := flag.Uint("outbox-max-attempts", 12, "maximum Outbox delivery attempts before dead-lettering; zero means unlimited")
 	workerDrainTimeout := flag.Duration("worker-drain-timeout", 15*time.Second, "maximum time allowed for background workers to drain during shutdown")
+	otlpEndpoint := flag.String("otlp-endpoint", "", "optional OTLP/HTTP trace collector endpoint")
+	otlpServiceName := flag.String("otlp-service-name", "agent-federation-hub", "OTLP service.name resource attribute")
+	otlpAllowHTTP := flag.Bool("otlp-allow-http", false, "allow an insecure HTTP OTLP endpoint for local development only")
 	flag.Parse()
 
 	store, err := openStore(context.Background(), *storageBackend, *journalPath, *postgresDSNEnv)
@@ -156,6 +169,16 @@ func main() {
 	}
 	var outboxPublisher worker.OutboxPublisher
 	outboxMetrics := &worker.OutboxMetrics{}
+	platformMetrics := &observability.Metrics{}
+	var platformTracer observability.Tracer = observability.NoopTracer()
+	if strings.TrimSpace(*otlpEndpoint) != "" {
+		tracer, tracerErr := observability.NewHTTPTracer(*otlpEndpoint, *otlpServiceName)
+		if tracerErr != nil {
+			log.Fatalf("OTLP tracer: %v", tracerErr)
+		}
+		tracer.AllowHTTP = *otlpAllowHTTP
+		platformTracer = tracer
+	}
 	if *outboxURL != "" {
 		if err := baseSecretProvider.ValidateReference(*outboxTokenReference); err != nil && *outboxTokenReference != "" {
 			log.Fatalf("outbox token reference: %v", err)
@@ -237,6 +260,7 @@ func main() {
 		TenantMaxObjects: *artifactTenantMaxObjects, Retention: *artifactRetention,
 		MIMEAllowlist: *artifactMIMEAllowlist, RequireClean: *artifactRequireClean,
 		Scanner: *artifactScanner, ClamAVNetwork: *artifactClamAVNetwork,
+		EncryptionKeyReference: *artifactEncryptionKeyRef, EncryptionKeyID: *artifactEncryptionKeyID,
 		ClamAVAddress: *artifactClamAVAddress, AllowPrivateURIs: *allowPrivateArtifactURIs,
 	}, artifactMetadata, secretProvider)
 	if err != nil {
@@ -318,8 +342,6 @@ func main() {
 			Required: *a2aRequireSignedCards,
 			Resolver: a2afederation.StaticCardSignatureResolver{*a2aCardSignatureKeyID: key},
 		})
-	} else if *a2aRequireSignedCards {
-		log.Fatal("--a2a-require-signed-cards requires --a2a-card-signature-key-file")
 	}
 	var outboundAdapter federation.Adapter = adapter
 	if *gatewayURL != "" {
@@ -408,6 +430,8 @@ func main() {
 		AllowPrivateAgentURLs: *allowPrivateAgentURLs,
 		Secrets:               secretProvider,
 		Artifacts:             artifacts,
+		Metrics:               platformMetrics,
+		Tracer:                platformTracer,
 	}
 	configuredTenants := make(map[string]struct{})
 	var configuredTenantsMu sync.RWMutex
@@ -453,6 +477,13 @@ func main() {
 			log.Fatalf("trust bundle: %v", err)
 		}
 		log.Printf("loaded trust bundle generation %d from %s", trustBundleManagerGeneration(trustBundleManager), *trustBundleFile)
+	}
+	if *a2aCardSignatureKeyFile == "" {
+		if trustBundleManager != nil {
+			adapter.SetCardVerifier(a2afederation.CardVerifier{Required: *a2aRequireSignedCards, Resolver: trustBundleManager})
+		} else if *a2aRequireSignedCards {
+			log.Fatal("--a2a-require-signed-cards requires --a2a-card-signature-key-file or --trust-bundle-file with cardKeys")
+		}
 	}
 	security := securityOptions{
 		AuthMode: *authMode, Issuer: *jwtIssuer, Audience: *jwtAudience,
@@ -514,10 +545,42 @@ func main() {
 		}
 		return nil
 	}
+	workflowInputs, workflowInputErr := buildWorkflowInputStore(context.Background(), workflowInputOptions{
+		Backend: *workflowInputStorage, Root: *workflowInputRoot,
+		KeyReference: *workflowInputKeyRef, KeyID: *workflowInputKeyID,
+	}, secretProvider, *authMode != "development")
+	if workflowInputErr != nil {
+		log.Fatal(workflowInputErr)
+	}
+	coordinator := &orchestration.Coordinator{Service: service, Inputs: workflowInputs}
+	var workerGate interface {
+		ModeString() string
+		Pause()
+		Resume()
+		BeginDrain()
+	}
+	var claimGate worker.ClaimGate
+	localGate := worker.NewGate()
+	workerGate = localGate
+	claimGate = localGate
+	var distributedGate *worker.DistributedGate
+	if strings.TrimSpace(*workerControlScope) != "" {
+		controlStore, supportsControl := store.(core.WorkerControlStore)
+		if !supportsControl {
+			log.Fatal("--worker-control-scope requires a store with durable worker controls")
+		}
+		distributedGate, err = worker.NewDistributedGate(context.Background(), controlStore, strings.TrimSpace(*workerControlScope))
+		if err != nil {
+			log.Fatalf("durable worker control: %v", err)
+		}
+		workerGate = distributedGate
+		claimGate = distributedGate
+	}
 	handler := (&hub.HTTPHandler{
-		Service: service, DecodePush: a2afederation.DecodePush,
+		Service: service, Workflows: coordinator, WorkerGate: workerGate, DecodePush: a2afederation.DecodePush,
 		Authenticator: authenticator, Authorizer: authorizer,
-		Audit: auditSink, Limiter: limiter, Metrics: outboxMetrics.Prometheus,
+		Audit: auditSink, Limiter: limiter, Observability: platformMetrics,
+		Metrics:   func() string { return platformMetrics.Prometheus() + outboxMetrics.Prometheus() },
 		Readiness: readiness,
 	}).Handler()
 	server := &http.Server{
@@ -539,6 +602,22 @@ func main() {
 	if agentConfigRuntime != nil && *agentConfigReloadInterval > 0 {
 		go agentConfigRuntime.Watch(ctx, *agentConfigReloadInterval)
 	}
+	if distributedGate != nil && *workerControlRefresh > 0 {
+		go func() {
+			ticker := time.NewTicker(*workerControlRefresh)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if refreshErr := distributedGate.Refresh(ctx); refreshErr != nil {
+						log.Printf("durable worker control refresh failed; retaining local mode: %v", refreshErr)
+					}
+				}
+			}
+		}()
+	}
 	resolvedWorkerID := *workerID
 	if resolvedWorkerID == "" {
 		resolvedWorkerID = "hub-" + core.NewID()
@@ -546,6 +625,7 @@ func main() {
 	background := &worker.Reconciler{
 		Store: store, Tasks: service, WorkerID: resolvedWorkerID,
 		LeaseDuration: *leaseDuration, PollInterval: *reconcileInterval,
+		Gate: claimGate,
 	}
 	var registrySyncCancel context.CancelFunc
 	if externalRegistry != nil && *registrySyncInterval > 0 {
@@ -571,17 +651,20 @@ func main() {
 	inbox := &worker.InboxProcessor{
 		Store: store, Apply: service, WorkerID: resolvedWorkerID + ":inbox",
 		LeaseDuration: *leaseDuration, PollInterval: time.Second,
+		Gate: claimGate,
 	}
 	artifactLifecycle := &artifactstore.Lifecycle{
 		Metadata: artifactMetadata, Objects: artifacts.Objects,
 		WorkerID: resolvedWorkerID + ":artifacts", LeaseDuration: *leaseDuration,
 		PollInterval: time.Minute,
+		Gate:         claimGate,
 	}
 	var outbox *worker.OutboxProcessor
 	if outboxPublisher != nil {
 		outbox = &worker.OutboxProcessor{
 			Store: store, Publisher: outboxPublisher, WorkerID: resolvedWorkerID + ":outbox",
 			LeaseDuration: *leaseDuration, PollInterval: time.Second,
+			Gate:        claimGate,
 			MaxAttempts: uint32(*outboxMaxAttempts),
 			Metrics:     outboxMetrics,
 		}
@@ -622,6 +705,11 @@ func main() {
 		log.Fatal(serveErr)
 	}
 	stop()
+	if distributedGate != nil {
+		distributedGate.BeginLocalDrain()
+	} else {
+		workerGate.BeginDrain()
+	}
 	if registrySyncCancel != nil {
 		registrySyncCancel()
 	}

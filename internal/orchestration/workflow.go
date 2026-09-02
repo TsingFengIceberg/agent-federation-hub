@@ -4,34 +4,193 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/hub"
 )
 
-// StepDefinition is the only workflow input that is specific to a domain.
-// The Hub stores the definition and remote Task IDs, but never inspects the
-// provider's prompts, tools, checkpoints, or internal graph.
-type StepDefinition struct {
-	ID               string `json:"id"`
-	AgentID          string `json:"agentId,omitempty"`
-	Skill            string `json:"skill,omitempty"`
-	Text             string `json:"text"`
-	Required         bool   `json:"required"`
-	CompensationText string `json:"compensationText,omitempty"`
+type StepDefinition = hub.WorkflowStepInput
+type WorkflowDefinition = hub.WorkflowDefinition
+type WorkflowResult = hub.WorkflowResult
+
+func normalizeDependencies(stepID string, values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		dependency := strings.TrimSpace(raw)
+		if dependency == "" {
+			return nil, fmt.Errorf("workflow step %q has an empty dependency", stepID)
+		}
+		if dependency == stepID {
+			return nil, fmt.Errorf("workflow step %q cannot depend on itself", stepID)
+		}
+		if _, ok := seen[dependency]; ok {
+			continue
+		}
+		seen[dependency] = struct{}{}
+		result = append(result, dependency)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
-type WorkflowDefinition struct {
-	ID    string           `json:"id,omitempty"`
-	Name  string           `json:"name"`
-	Steps []StepDefinition `json:"steps"`
+func validateWorkflowGraph(steps []core.WorkflowStep) error {
+	known := make(map[string]struct{}, len(steps))
+	for _, step := range steps {
+		known[step.ID] = struct{}{}
+	}
+	graph := make(map[string][]string, len(steps))
+	for _, step := range steps {
+		for _, dependency := range step.DependsOn {
+			if _, ok := known[dependency]; !ok {
+				return fmt.Errorf("workflow step %q depends on unknown step %q", step.ID, dependency)
+			}
+			graph[step.ID] = append(graph[step.ID], dependency)
+		}
+	}
+	visit := make(map[string]uint8, len(steps))
+	var walk func(string) error
+	walk = func(id string) error {
+		switch visit[id] {
+		case 1:
+			return fmt.Errorf("workflow dependency cycle detected at step %q", id)
+		case 2:
+			return nil
+		}
+		visit[id] = 1
+		for _, dependency := range graph[id] {
+			if err := walk(dependency); err != nil {
+				return err
+			}
+		}
+		visit[id] = 2
+		return nil
+	}
+	for _, step := range steps {
+		if err := walk(step.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-type WorkflowResult struct {
-	Workflow core.Workflow `json:"workflow"`
-	Errors   []string      `json:"errors,omitempty"`
+// submitWorkflowReady advances only dependency-ready steps. A batch is
+// bounded by maxConcurrency and each mutation is idempotent in the durable
+// workflow store, so a retry after a process crash cannot resubmit a step that
+// already has a local Task ID.
+func (c *Coordinator) submitWorkflowReady(ctx context.Context, tenantID, workflowID string, maxConcurrency int, failures *[]string) error {
+	store, err := c.workflowStore()
+	if err != nil {
+		return err
+	}
+	for {
+		workflow, err := store.GetWorkflow(ctx, tenantID, workflowID)
+		if err != nil {
+			return err
+		}
+		ready := make([]int, 0, maxConcurrency)
+		blocked := make([]int, 0)
+		for index, step := range workflow.Steps {
+			if step.TaskID != "" || step.State != core.TaskStateUnknown {
+				continue
+			}
+			allTerminal, dependencyFailed := true, false
+			for _, dependencyID := range step.DependsOn {
+				dependency := findWorkflowStep(workflow.Steps, dependencyID)
+				if dependency == nil || !dependency.State.Terminal() {
+					allTerminal = false
+					break
+				}
+				if dependency.State != core.TaskStateCompleted {
+					dependencyFailed = true
+				}
+			}
+			if !allTerminal {
+				continue
+			}
+			if dependencyFailed && step.Required {
+				blocked = append(blocked, index)
+			} else {
+				ready = append(ready, index)
+			}
+		}
+		for _, index := range blocked {
+			stepID := workflow.Steps[index].ID
+			_, _, applyErr := store.ApplyWorkflowVersion(ctx, tenantID, workflow.ID, 0, "blocked:"+stepID, func(current *core.Workflow) (core.WorkflowEvent, error) {
+				problem := core.Problem{Category: "state", Code: "DEPENDENCY_FAILED", Message: "a required workflow dependency failed"}
+				current.Steps[index].State = core.TaskStateRejected
+				current.Steps[index].Problem = &problem
+				current.State = workflowStateForSteps(current.Steps)
+				current.UpdatedAt = time.Now().UTC()
+				return core.WorkflowEvent{Type: "workflow.step.blocked", Source: "hub", StepID: stepID, State: current.State, Problem: &problem, CreatedAt: current.UpdatedAt}, nil
+			})
+			if applyErr != nil {
+				return applyErr
+			}
+			*failures = append(*failures, fmt.Sprintf("%s: required dependency failed", stepID))
+		}
+		if len(ready) == 0 {
+			return nil
+		}
+		if len(ready) > maxConcurrency {
+			ready = ready[:maxConcurrency]
+		}
+		type branchResult struct {
+			index int
+			task  core.Task
+			err   error
+		}
+		results := make(chan branchResult, len(ready))
+		for _, index := range ready {
+			index := index
+			step := workflow.Steps[index]
+			go func() {
+				text, inputErr := c.inputStore().Get(ctx, tenantID, step.InputRef)
+				if inputErr != nil {
+					results <- branchResult{index: index, err: inputErr}
+					return
+				}
+				task, submitErr := c.Service.SubmitTask(ctx, tenantID, hub.SubmitTaskInput{AgentID: step.AgentID, Skill: step.Skill, Text: text})
+				results <- branchResult{index: index, task: task, err: submitErr}
+			}()
+		}
+		for range ready {
+			result := <-results
+			stepID := workflow.Steps[result.index].ID
+			_, _, applyErr := store.ApplyWorkflowVersion(ctx, tenantID, workflow.ID, 0, "start:"+stepID, func(current *core.Workflow) (core.WorkflowEvent, error) {
+				step := &current.Steps[result.index]
+				step.Attempt++
+				if result.err != nil {
+					step.State = core.TaskStateFailed
+					problem := core.Problem{Category: "provider", Code: "STEP_SUBMIT_FAILED", Message: result.err.Error(), Retryable: true}
+					step.Problem = &problem
+					*failures = append(*failures, fmt.Sprintf("%s: %v", stepID, result.err))
+				} else {
+					step.TaskID = result.task.ID
+					step.AgentID = result.task.AgentID
+					step.State = result.task.State
+				}
+				current.State = workflowStateForSteps(current.Steps)
+				current.UpdatedAt = time.Now().UTC()
+				return core.WorkflowEvent{Type: "workflow.step.submitted", Source: "hub", StepID: stepID, State: current.State, CreatedAt: current.UpdatedAt}, nil
+			})
+			if applyErr != nil {
+				return applyErr
+			}
+		}
+	}
+}
+
+func findWorkflowStep(steps []core.WorkflowStep, id string) *core.WorkflowStep {
+	for index := range steps {
+		if steps[index].ID == id {
+			return &steps[index]
+		}
+	}
+	return nil
 }
 
 // StartWorkflow creates a durable aggregate before contacting any Provider.
@@ -44,6 +203,20 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, tenantID string, defini
 	}
 	if tenantID == "" || len(definition.Steps) == 0 {
 		return WorkflowResult{}, errors.New("workflow tenant and at least one step are required")
+	}
+	definitionVersion := definition.DefinitionVersion
+	if definitionVersion <= 0 {
+		definitionVersion = 1
+	}
+	if definitionVersion > 1000 {
+		return WorkflowResult{}, errors.New("workflow definition version must be between 1 and 1000")
+	}
+	maxConcurrency := definition.MaxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = len(definition.Steps)
+	}
+	if maxConcurrency < 1 || maxConcurrency > 1024 {
+		return WorkflowResult{}, errors.New("workflow maxConcurrency must be between 1 and 1024")
 	}
 	seen := make(map[string]struct{}, len(definition.Steps))
 	steps := make([]core.WorkflowStep, 0, len(definition.Steps))
@@ -62,72 +235,64 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, tenantID string, defini
 		if definitionStep.Text == "" {
 			return WorkflowResult{}, fmt.Errorf("workflow step %q text is required", stepID)
 		}
+		dependencies, dependencyErr := normalizeDependencies(stepID, definitionStep.DependsOn)
+		if dependencyErr != nil {
+			return WorkflowResult{}, dependencyErr
+		}
 		steps = append(steps, core.WorkflowStep{
 			ID: stepID, AgentID: definitionStep.AgentID, Skill: definitionStep.Skill,
-			State: core.TaskStateUnknown, Required: definitionStep.Required,
+			DependsOn: dependencies,
+			State:     core.TaskStateUnknown, Required: definitionStep.Required,
 			CompensationText: definitionStep.CompensationText,
 		})
 	}
+	if err := validateWorkflowGraph(steps); err != nil {
+		return WorkflowResult{}, err
+	}
 	workflowID := definition.ID
 	if workflowID == "" {
-		workflowID = core.NewID()
+		if strings.TrimSpace(definition.IdempotencyKey) != "" {
+			workflowID = "wf-" + core.DigestString(tenantID + "\x00" + strings.TrimSpace(definition.IdempotencyKey))[:32]
+		} else {
+			workflowID = core.NewID()
+		}
 	}
 	now := time.Now().UTC()
 	workflow, err := store.CreateWorkflow(ctx, core.Workflow{
 		ID: workflowID, TenantID: tenantID, Name: definition.Name,
-		State: core.WorkflowStatePending, Steps: steps, CreatedAt: now, UpdatedAt: now,
+		DefinitionVersion: definitionVersion, IdempotencyKey: definition.IdempotencyKey,
+		MaxConcurrency: maxConcurrency,
+		State:          core.WorkflowStatePending, Steps: steps, CreatedAt: now, UpdatedAt: now,
 	}, core.WorkflowEvent{Type: "workflow.created", Source: "hub", State: core.WorkflowStatePending, CreatedAt: now})
 	if err != nil {
+		if errors.Is(err, core.ErrConflict) && strings.TrimSpace(definition.IdempotencyKey) != "" {
+			existing, getErr := store.GetWorkflow(ctx, tenantID, workflowID)
+			if getErr == nil && existing.IdempotencyKey == strings.TrimSpace(definition.IdempotencyKey) && existing.DefinitionVersion == definitionVersion {
+				return WorkflowResult{Workflow: existing}, nil
+			}
+		}
 		return WorkflowResult{}, err
 	}
 
-	type branchResult struct {
-		index int
-		task  core.Task
-		err   error
-	}
-	results := make(chan branchResult, len(definition.Steps))
-	var wait sync.WaitGroup
+	inputStore := c.inputStore()
 	for index, definitionStep := range definition.Steps {
-		index, definitionStep := index, definitionStep
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			task, submitErr := c.Service.SubmitTask(ctx, tenantID, hub.SubmitTaskInput{
-				AgentID: definitionStep.AgentID, Skill: definitionStep.Skill, Text: definitionStep.Text,
-			})
-			results <- branchResult{index: index, task: task, err: submitErr}
-		}()
-	}
-	wait.Wait()
-	close(results)
-	ordered := make([]branchResult, len(definition.Steps))
-	for result := range results {
-		ordered[result.index] = result
+		ref, inputErr := inputStore.Put(ctx, tenantID, workflow.ID, steps[index].ID, definitionStep.Text)
+		if inputErr != nil {
+			return WorkflowResult{Workflow: workflow}, inputErr
+		}
+		_, _, inputRefErr := store.ApplyWorkflowVersion(ctx, tenantID, workflow.ID, 0, "input:"+steps[index].ID, func(current *core.Workflow) (core.WorkflowEvent, error) {
+			current.Steps[index].InputRef = ref
+			current.Steps[index].InputDigest = core.DigestString(definitionStep.Text)
+			current.UpdatedAt = time.Now().UTC()
+			return core.WorkflowEvent{Type: "workflow.input.stored", Source: "hub", StepID: steps[index].ID, CreatedAt: current.UpdatedAt}, nil
+		})
+		if inputRefErr != nil {
+			return WorkflowResult{Workflow: workflow}, inputRefErr
+		}
 	}
 	var failures []string
-	for index, result := range ordered {
-		stepID := steps[index].ID
-		_, _, updateErr := store.ApplyWorkflowVersion(ctx, tenantID, workflow.ID, 0,
-			"start:"+stepID, func(current *core.Workflow) (core.WorkflowEvent, error) {
-				step := &current.Steps[index]
-				if result.err != nil {
-					step.State = core.TaskStateFailed
-					problem := core.Problem{Category: "provider", Code: "STEP_SUBMIT_FAILED", Message: result.err.Error(), Retryable: true}
-					step.Problem = &problem
-					failures = append(failures, fmt.Sprintf("%s: %v", stepID, result.err))
-				} else {
-					step.TaskID = result.task.ID
-					step.AgentID = result.task.AgentID
-					step.State = result.task.State
-				}
-				current.State = workflowStateForSteps(current.Steps)
-				current.UpdatedAt = time.Now().UTC()
-				return core.WorkflowEvent{Type: "workflow.step.submitted", Source: "hub", StepID: stepID, State: current.State, CreatedAt: current.UpdatedAt}, nil
-			})
-		if updateErr != nil {
-			return WorkflowResult{Workflow: workflow, Errors: failures}, updateErr
-		}
+	if err := c.submitWorkflowReady(ctx, tenantID, workflow.ID, maxConcurrency, &failures); err != nil {
+		return WorkflowResult{Workflow: workflow, Errors: failures}, err
 	}
 	workflow, err = store.GetWorkflow(ctx, tenantID, workflow.ID)
 	return WorkflowResult{Workflow: workflow, Errors: failures}, err
@@ -148,6 +313,9 @@ func (c *Coordinator) ReconcileWorkflow(ctx context.Context, tenantID, workflowI
 		workflow, err = c.reconcileCompensation(ctx, tenantID, workflowID)
 		return WorkflowResult{Workflow: workflow}, err
 	}
+	if workflow.State == core.WorkflowStatePaused {
+		return WorkflowResult{Workflow: workflow}, nil
+	}
 	var failures []string
 	for index := range workflow.Steps {
 		step := workflow.Steps[index]
@@ -164,7 +332,110 @@ func (c *Coordinator) ReconcileWorkflow(ctx context.Context, tenantID, workflowI
 			return WorkflowResult{Workflow: workflow, Errors: failures}, err
 		}
 	}
+	maxConcurrency := workflow.MaxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = len(workflow.Steps)
+	}
+	if err := c.submitWorkflowReady(ctx, tenantID, workflowID, maxConcurrency, &failures); err != nil {
+		return WorkflowResult{Workflow: workflow, Errors: failures}, err
+	}
 	workflow, err = store.GetWorkflow(ctx, tenantID, workflowID)
+	return WorkflowResult{Workflow: workflow, Errors: failures}, err
+}
+
+func (c *Coordinator) GetWorkflow(ctx context.Context, tenantID, workflowID string) (core.Workflow, error) {
+	store, err := c.workflowStore()
+	if err != nil {
+		return core.Workflow{}, err
+	}
+	return store.GetWorkflow(ctx, tenantID, workflowID)
+}
+
+func (c *Coordinator) ListWorkflows(ctx context.Context, tenantID string) ([]core.Workflow, error) {
+	store, err := c.workflowStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListWorkflows(ctx, tenantID)
+}
+
+func (c *Coordinator) PauseWorkflow(ctx context.Context, tenantID, workflowID string) (WorkflowResult, error) {
+	store, err := c.workflowStore()
+	if err != nil {
+		return WorkflowResult{}, err
+	}
+	workflow, err := store.GetWorkflow(ctx, tenantID, workflowID)
+	if err != nil {
+		return WorkflowResult{}, err
+	}
+	if workflow.State.Terminal() || workflow.State == core.WorkflowStatePaused {
+		return WorkflowResult{Workflow: workflow}, fmt.Errorf("workflow cannot be paused from state %s", workflow.State)
+	}
+	dedupKey := fmt.Sprintf("workflow:pause:%d", workflow.Revision)
+	workflow, _, err = store.ApplyWorkflowVersion(ctx, tenantID, workflowID, 0, dedupKey, func(current *core.Workflow) (core.WorkflowEvent, error) {
+		if current.State.Terminal() || current.State == core.WorkflowStatePaused {
+			return core.WorkflowEvent{}, fmt.Errorf("workflow cannot be paused from state %s", current.State)
+		}
+		current.PausedFrom = current.State
+		current.State = core.WorkflowStatePaused
+		current.UpdatedAt = time.Now().UTC()
+		return core.WorkflowEvent{Type: "workflow.paused", Source: "operator", State: current.State, CreatedAt: current.UpdatedAt}, nil
+	})
+	return WorkflowResult{Workflow: workflow}, err
+}
+
+func (c *Coordinator) ResumeWorkflow(ctx context.Context, tenantID, workflowID string) (WorkflowResult, error) {
+	store, err := c.workflowStore()
+	if err != nil {
+		return WorkflowResult{}, err
+	}
+	workflow, err := store.GetWorkflow(ctx, tenantID, workflowID)
+	if err != nil {
+		return WorkflowResult{}, err
+	}
+	if workflow.State != core.WorkflowStatePaused {
+		return WorkflowResult{Workflow: workflow}, fmt.Errorf("workflow cannot be resumed from state %s", workflow.State)
+	}
+	dedupKey := fmt.Sprintf("workflow:resume:%d", workflow.Revision)
+	workflow, _, err = store.ApplyWorkflowVersion(ctx, tenantID, workflowID, 0, dedupKey, func(current *core.Workflow) (core.WorkflowEvent, error) {
+		if current.State != core.WorkflowStatePaused {
+			return core.WorkflowEvent{}, fmt.Errorf("workflow cannot be resumed from state %s", current.State)
+		}
+		current.State = workflowStateForSteps(current.Steps)
+		current.PausedFrom = ""
+		current.UpdatedAt = time.Now().UTC()
+		return core.WorkflowEvent{Type: "workflow.resumed", Source: "operator", State: current.State, CreatedAt: current.UpdatedAt}, nil
+	})
+	return WorkflowResult{Workflow: workflow}, err
+}
+
+func (c *Coordinator) CancelWorkflow(ctx context.Context, tenantID, workflowID string) (WorkflowResult, error) {
+	store, err := c.workflowStore()
+	if err != nil {
+		return WorkflowResult{}, err
+	}
+	workflow, err := store.GetWorkflow(ctx, tenantID, workflowID)
+	if err != nil {
+		return WorkflowResult{}, err
+	}
+	if workflow.State.Terminal() {
+		return WorkflowResult{Workflow: workflow}, fmt.Errorf("workflow is already terminal: %s", workflow.State)
+	}
+	var failures []string
+	for _, step := range workflow.Steps {
+		if step.TaskID == "" || step.State.Terminal() {
+			continue
+		}
+		if _, cancelErr := c.Service.CancelTask(ctx, tenantID, step.TaskID); cancelErr != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", step.ID, cancelErr))
+		}
+	}
+	dedupKey := fmt.Sprintf("workflow:cancel:%d", workflow.Revision)
+	workflow, _, err = store.ApplyWorkflowVersion(ctx, tenantID, workflowID, 0, dedupKey, func(current *core.Workflow) (core.WorkflowEvent, error) {
+		current.State = core.WorkflowStateCanceled
+		current.UpdatedAt = time.Now().UTC()
+		return core.WorkflowEvent{Type: "workflow.canceled", Source: "operator", State: current.State, CreatedAt: current.UpdatedAt}, nil
+	})
 	return WorkflowResult{Workflow: workflow, Errors: failures}, err
 }
 
@@ -195,6 +466,13 @@ func (c *Coordinator) ContinueWorkflow(ctx context.Context, tenantID, workflowID
 		if err != nil {
 			return WorkflowResult{Workflow: workflow, Errors: failures}, err
 		}
+	}
+	maxConcurrency := workflow.MaxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = len(workflow.Steps)
+	}
+	if err := c.submitWorkflowReady(ctx, tenantID, workflowID, maxConcurrency, &failures); err != nil {
+		return WorkflowResult{Workflow: workflow, Errors: failures}, err
 	}
 	workflow, err = store.GetWorkflow(ctx, tenantID, workflowID)
 	return WorkflowResult{Workflow: workflow, Errors: failures}, err

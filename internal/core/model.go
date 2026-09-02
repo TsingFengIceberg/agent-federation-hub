@@ -42,6 +42,7 @@ const (
 	WorkflowStateCompensating    WorkflowState = "COMPENSATING"
 	WorkflowStateCompensated     WorkflowState = "COMPENSATED"
 	WorkflowStateCanceled        WorkflowState = "CANCELED"
+	WorkflowStatePaused          WorkflowState = "PAUSED"
 )
 
 func (s WorkflowState) Terminal() bool {
@@ -54,9 +55,13 @@ type WorkflowStep struct {
 	ID                  string    `json:"id"`
 	AgentID             string    `json:"agentId"`
 	Skill               string    `json:"skill,omitempty"`
+	DependsOn           []string  `json:"dependsOn,omitempty"`
+	InputRef            string    `json:"inputRef,omitempty"`
+	InputDigest         string    `json:"inputDigest,omitempty"`
 	TaskID              string    `json:"taskId,omitempty"`
 	State               TaskState `json:"state"`
 	Required            bool      `json:"required"`
+	Attempt             uint32    `json:"attempt,omitempty"`
 	CompensationText    string    `json:"compensationText,omitempty"`
 	CompensationTaskID  string    `json:"compensationTaskId,omitempty"`
 	CompensationState   TaskState `json:"compensationState,omitempty"`
@@ -65,15 +70,19 @@ type WorkflowStep struct {
 }
 
 type Workflow struct {
-	ID           string         `json:"id"`
-	TenantID     string         `json:"tenantId"`
-	Name         string         `json:"name"`
-	State        WorkflowState  `json:"state"`
-	Steps        []WorkflowStep `json:"steps"`
-	CreatedAt    time.Time      `json:"createdAt"`
-	UpdatedAt    time.Time      `json:"updatedAt"`
-	Revision     uint64         `json:"revision"`
-	LastSequence uint64         `json:"lastSequence"`
+	ID                string         `json:"id"`
+	TenantID          string         `json:"tenantId"`
+	Name              string         `json:"name"`
+	DefinitionVersion int            `json:"definitionVersion"`
+	IdempotencyKey    string         `json:"idempotencyKey,omitempty"`
+	MaxConcurrency    int            `json:"maxConcurrency"`
+	State             WorkflowState  `json:"state"`
+	Steps             []WorkflowStep `json:"steps"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	UpdatedAt         time.Time      `json:"updatedAt"`
+	PausedFrom        WorkflowState  `json:"pausedFrom,omitempty"`
+	Revision          uint64         `json:"revision"`
+	LastSequence      uint64         `json:"lastSequence"`
 }
 
 type WorkflowEvent struct {
@@ -88,6 +97,15 @@ type WorkflowEvent struct {
 	StepID     string        `json:"stepId,omitempty"`
 	Problem    *Problem      `json:"problem,omitempty"`
 	CreatedAt  time.Time     `json:"createdAt"`
+}
+
+// WorkerControl is durable operator state shared by Hub instances. Mode is
+// intentionally a small vocabulary so workers fail closed on unknown values.
+type WorkerControl struct {
+	Scope     string    `json:"scope"`
+	Mode      string    `json:"mode"`
+	Revision  uint64    `json:"revision"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 func CloneWorkflow(workflow Workflow) (Workflow, error) {
@@ -160,6 +178,7 @@ type Agent struct {
 	CardSignatureVerified bool              `json:"cardSignatureVerified,omitempty"`
 	CardSignatureKeyID    string            `json:"cardSignatureKeyId,omitempty"`
 	Skills                []string          `json:"skills,omitempty"`
+	Extensions            []string          `json:"extensions,omitempty"`
 	CredentialEnv         map[string]string `json:"credentialEnv,omitempty"`
 	RegistrationSource    string            `json:"registrationSource,omitempty"`
 	RegistryEndpoint      string            `json:"registryEndpoint,omitempty"`
@@ -189,24 +208,28 @@ func CloneAgent(agent Agent) (Agent, error) {
 }
 
 type Task struct {
-	ID                   string        `json:"id"`
-	TenantID             string        `json:"tenantId"`
-	AgentID              string        `json:"agentId"`
-	MessageID            string        `json:"messageId"`
-	InputDigest          string        `json:"inputDigest"`
-	RemoteTaskID         string        `json:"remoteTaskId,omitempty"`
-	RemoteContextID      string        `json:"remoteContextId,omitempty"`
-	State                TaskState     `json:"state"`
-	Delivery             DeliveryState `json:"delivery"`
-	CancelRequested      bool          `json:"cancelRequested"`
-	PushTokenHash        string        `json:"pushTokenHash,omitempty"`
-	Artifacts            []Artifact    `json:"artifacts,omitempty"`
-	Problem              *Problem      `json:"problem,omitempty"`
-	LastRemoteObservedAt *time.Time    `json:"lastRemoteObservedAt,omitempty"`
-	CreatedAt            time.Time     `json:"createdAt"`
-	UpdatedAt            time.Time     `json:"updatedAt"`
-	Revision             uint64        `json:"revision"`
-	LastSequence         uint64        `json:"lastSequence"`
+	ID                   string         `json:"id"`
+	TenantID             string         `json:"tenantId"`
+	AgentID              string         `json:"agentId"`
+	MessageID            string         `json:"messageId"`
+	InputDigest          string         `json:"inputDigest"`
+	IdempotencyKey       string         `json:"idempotencyKey,omitempty"`
+	RequestedExtensions  []string       `json:"requestedExtensions,omitempty"`
+	ExtensionMetadata    map[string]any `json:"extensionMetadata,omitempty"`
+	Priority             int            `json:"priority,omitempty"`
+	RemoteTaskID         string         `json:"remoteTaskId,omitempty"`
+	RemoteContextID      string         `json:"remoteContextId,omitempty"`
+	State                TaskState      `json:"state"`
+	Delivery             DeliveryState  `json:"delivery"`
+	CancelRequested      bool           `json:"cancelRequested"`
+	PushTokenHash        string         `json:"pushTokenHash,omitempty"`
+	Artifacts            []Artifact     `json:"artifacts,omitempty"`
+	Problem              *Problem       `json:"problem,omitempty"`
+	LastRemoteObservedAt *time.Time     `json:"lastRemoteObservedAt,omitempty"`
+	CreatedAt            time.Time      `json:"createdAt"`
+	UpdatedAt            time.Time      `json:"updatedAt"`
+	Revision             uint64         `json:"revision"`
+	LastSequence         uint64         `json:"lastSequence"`
 }
 
 type WorkLease struct {

@@ -28,11 +28,11 @@ import (
 	v1 "github.com/a2aproject/a2a-go/v2/a2apb/v1"
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1/pbconv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const protocolVersion = "1.0"
@@ -151,8 +151,8 @@ func cloneTask(task *a2a.Task) *a2a.Task {
 
 type tckExecutor struct{ state *sutTaskState }
 
-// grpcTCKHandler keeps the SDK's conversion layer while making unsupported
-// Push operations and task subscriptions explicit for the fixture.
+// grpcTCKHandler keeps the SDK's conversion layer while making task
+// subscriptions explicit for the fixture.
 type grpcTCKHandler struct {
 	*a2agrpc.Handler
 	requestHandler a2asrv.RequestHandler
@@ -233,22 +233,6 @@ func sendGRPCTask(stream grpc.ServerStreamingServer[v1.StreamResponse], task *a2
 		return status.Error(codes.Aborted, err.Error())
 	}
 	return nil
-}
-
-func (h *grpcTCKHandler) CreateTaskPushNotificationConfig(context.Context, *v1.TaskPushNotificationConfig) (*v1.TaskPushNotificationConfig, error) {
-	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
-}
-
-func (h *grpcTCKHandler) GetTaskPushNotificationConfig(context.Context, *v1.GetTaskPushNotificationConfigRequest) (*v1.TaskPushNotificationConfig, error) {
-	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
-}
-
-func (h *grpcTCKHandler) ListTaskPushNotificationConfigs(context.Context, *v1.ListTaskPushNotificationConfigsRequest) (*v1.ListTaskPushNotificationConfigsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
-}
-
-func (h *grpcTCKHandler) DeleteTaskPushNotificationConfig(context.Context, *v1.DeleteTaskPushNotificationConfigRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "push notification is not supported by this fixture")
 }
 
 // nonNilTaskStore keeps the REST representation conformant for an empty task
@@ -413,16 +397,20 @@ func main() {
 		Name: "Agent Federation Hub Repository TCK SUT", Version: "1.0.0",
 		Description:         "Repository-owned deterministic A2A v1 compatibility fixture",
 		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(interfaceURL, protocolBinding)},
-		Capabilities:        a2a.AgentCapabilities{Streaming: true},
+		Capabilities:        a2a.AgentCapabilities{Streaming: true, PushNotifications: true},
 		DefaultInputModes:   []string{"text"}, DefaultOutputModes: []string{"text", "application/json", "text/plain"},
 		Skills: []a2a.AgentSkill{{ID: "tck", Name: "A2A TCK fixture", Description: "Deterministic protocol scenarios", Tags: []string{"tck"}}},
 	}
 	state := newSUTTaskState()
+	pushStore := push.NewInMemoryStore()
+	pushSender := push.NewHTTPPushSender(&push.HTTPSenderConfig{AllowPrivateNetworks: true, Timeout: 5 * time.Second})
 	tasks := nonNilTaskStore{Store: taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
 		Authenticator: a2asrv.NewTaskStoreAuthenticator(),
 	})}
 	handler := a2asrv.NewHandler(tckExecutor{state: state},
-		a2asrv.WithTaskStore(tasks), a2asrv.WithCallInterceptors(versionInterceptor{}))
+		a2asrv.WithTaskStore(tasks), a2asrv.WithPushNotifications(pushStore, pushSender),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true, PushNotifications: true}),
+		a2asrv.WithCallInterceptors(versionInterceptor{}))
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
 	var protocolHandler http.Handler
@@ -505,9 +493,54 @@ func guardedJSONRPCHandler(state *sutTaskState, next http.Handler) http.Handler 
 				}
 			}
 		}
+		body = normalizePushTaskIDAlias(body)
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// normalizePushTaskIDAlias accepts the snake_case task_id emitted by the
+// pinned TCK's JSON-RPC client while preserving the canonical taskId wire
+// field used by the A2A v1 JSON-RPC binding. This compatibility shim is kept
+// inside the repository-owned fixture and does not change the Hub adapter.
+func normalizePushTaskIDAlias(body []byte) []byte {
+	var request struct {
+		Method string                     `json:"method"`
+		Params map[string]json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || request.Params == nil {
+		return body
+	}
+	switch request.Method {
+	case "CreateTaskPushNotificationConfig", "GetTaskPushNotificationConfig",
+		"ListTaskPushNotificationConfigs", "DeleteTaskPushNotificationConfig":
+	default:
+		return body
+	}
+	value, ok := request.Params["task_id"]
+	if !ok {
+		return body
+	}
+	if _, exists := request.Params["taskId"]; !exists {
+		request.Params["taskId"] = value
+	}
+	delete(request.Params, "task_id")
+	// Preserve the original request envelope (including its request ID) when
+	// rebuilding the body; only the params field is intentionally changed.
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	params, err := json.Marshal(request.Params)
+	if err != nil {
+		return body
+	}
+	envelope["params"] = params
+	result, err := json.Marshal(envelope)
+	if err != nil {
+		return body
+	}
+	return result
 }
 
 // guardedRESTHandler supplies the subscription semantics required by the

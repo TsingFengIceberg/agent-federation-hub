@@ -71,6 +71,8 @@ type DiscoveryPolicy struct {
 	RequiredCapabilities   map[string]bool `yaml:"required_capabilities"`
 	RequiredSkills         []string        `yaml:"required_skills"`
 	AllowedSkills          []string        `yaml:"allowed_skills"`
+	RequiredExtensions     []string        `yaml:"required_extensions"`
+	AllowedExtensions      []string        `yaml:"allowed_extensions"`
 }
 
 type ExecutionPolicy struct {
@@ -188,6 +190,13 @@ func (p DiscoveryPolicy) Validate(field string, required bool) error {
 			return fmt.Errorf("%s.required_skills[%d] must not be empty", field, i)
 		}
 	}
+	for name, values := range map[string][]string{"required_extensions": p.RequiredExtensions, "allowed_extensions": p.AllowedExtensions} {
+		for i, value := range values {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("%s.%s[%d] must not be empty", field, name, i)
+			}
+		}
+	}
 	return nil
 }
 
@@ -301,6 +310,12 @@ func mergeDiscovery(base, override DiscoveryPolicy) DiscoveryPolicy {
 	if result.AllowedSkills == nil {
 		result.AllowedSkills = base.AllowedSkills
 	}
+	if result.RequiredExtensions == nil {
+		result.RequiredExtensions = base.RequiredExtensions
+	}
+	if result.AllowedExtensions == nil {
+		result.AllowedExtensions = base.AllowedExtensions
+	}
 	return result
 }
 
@@ -358,6 +373,8 @@ func (r Registration) RegistrationPolicy(defaults Defaults) hub.AgentRegistratio
 	policy.RequirePushNotifications = discovery.RequiredCapabilities["push_notifications"]
 	policy.RequiredSkills = append([]string(nil), discovery.RequiredSkills...)
 	policy.AllowedSkills = append([]string(nil), discovery.AllowedSkills...)
+	policy.RequiredExtensions = append([]string(nil), discovery.RequiredExtensions...)
+	policy.AllowedExtensions = append([]string(nil), discovery.AllowedExtensions...)
 	return policy
 }
 

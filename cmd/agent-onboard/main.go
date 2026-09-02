@@ -28,6 +28,8 @@ func main() {
 	profilesValue := flag.String("profiles", "JSONRPC", "ordered A2A profiles: JSONRPC, HTTP_JSON, or GRPC")
 	requiredSkillsValue := flag.String("required-skills", "", "comma-separated required skill IDs")
 	allowedSkillsValue := flag.String("allowed-skills", "", "comma-separated allowed skill IDs")
+	requiredExtensionsValue := flag.String("required-extensions", "", "comma-separated required extension URIs")
+	allowedExtensionsValue := flag.String("allowed-extensions", "", "comma-separated allowed extension URIs")
 	requiredSecurityValue := flag.String("required-security-schemes", "", "comma-separated required security scheme names")
 	requireStreaming := flag.Bool("require-streaming", false, "require streaming capability")
 	requirePush := flag.Bool("require-push", false, "require Push notification capability")
@@ -41,7 +43,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	policy, resolvedURL, err := resolvePolicy(*cardURL, *configPath, *agentID, *profilesValue, *requiredSkillsValue, *allowedSkillsValue, *requiredSecurityValue, *requireStreaming, *requirePush, *requireSigned)
+	policy, resolvedURL, err := resolvePolicy(*cardURL, *configPath, *agentID, *profilesValue, *requiredSkillsValue, *allowedSkillsValue, *requiredExtensionsValue, *allowedExtensionsValue, *requiredSecurityValue, *requireStreaming, *requirePush, *requireSigned)
 	if err != nil {
 		fatalOutput(*output, onboarding.Report{Version: onboarding.ReportVersion, EvidenceStatus: "configuration", CardURL: resolvedURL, GeneratedAt: time.Now().UTC(), Checks: []onboarding.Check{{ID: "configuration", Status: onboarding.CheckFailed, Message: err.Error()}}, Error: err.Error()})
 	}
@@ -77,7 +79,7 @@ func main() {
 	}
 }
 
-func resolvePolicy(cardURL, configPath, selectedID, profilesValue, requiredSkillsValue, allowedSkillsValue, requiredSecurityValue string, requireStreaming, requirePush, requireSigned bool) (onboarding.Policy, string, error) {
+func resolvePolicy(cardURL, configPath, selectedID, profilesValue, requiredSkillsValue, allowedSkillsValue, requiredExtensionsValue, allowedExtensionsValue, requiredSecurityValue string, requireStreaming, requirePush, requireSigned bool) (onboarding.Policy, string, error) {
 	if strings.TrimSpace(configPath) != "" {
 		file, err := agentconfig.LoadFile(configPath)
 		if err != nil {
@@ -106,6 +108,8 @@ func resolvePolicy(cardURL, configPath, selectedID, profilesValue, requiredSkill
 			registrationPolicy := registration.RegistrationPolicy(file.Defaults)
 			policy.RequiredSkills = append([]string(nil), registrationPolicy.RequiredSkills...)
 			policy.AllowedSkills = append([]string(nil), registrationPolicy.AllowedSkills...)
+			policy.RequiredExtensions = append([]string(nil), registrationPolicy.RequiredExtensions...)
+			policy.AllowedExtensions = append([]string(nil), registrationPolicy.AllowedExtensions...)
 			policy.RequireStreaming = registrationPolicy.RequireStreaming
 			policy.RequirePush = registrationPolicy.RequirePushNotifications
 			policy.RequiredSecuritySchemes = nil
@@ -119,6 +123,7 @@ func resolvePolicy(cardURL, configPath, selectedID, profilesValue, requiredSkill
 	}
 	return onboarding.Policy{
 		Profiles: profiles, RequiredSkills: splitCSV(requiredSkillsValue), AllowedSkills: splitCSV(allowedSkillsValue),
+		RequiredExtensions: splitCSV(requiredExtensionsValue), AllowedExtensions: splitCSV(allowedExtensionsValue),
 		RequiredSecuritySchemes: splitCSV(requiredSecurityValue), RequireStreaming: requireStreaming,
 		RequirePush: requirePush, RequireSignedCard: requireSigned,
 	}, cardURL, nil

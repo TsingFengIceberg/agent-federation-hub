@@ -256,6 +256,27 @@ func TestJournalWorkLeaseExclusionExpiryAndRetrySchedule(t *testing.T) {
 	}
 }
 
+func TestJournalWorkLeasesPreferHigherPriority(t *testing.T) {
+	store, err := OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	for _, task := range []Task{
+		{ID: "low", TenantID: "tenant-a", AgentID: "agent", RemoteTaskID: "remote-low", Priority: 1, State: TaskStateWorking, CreatedAt: now, UpdatedAt: now},
+		{ID: "high", TenantID: "tenant-a", AgentID: "agent", RemoteTaskID: "remote-high", Priority: 100, State: TaskStateWorking, CreatedAt: now, UpdatedAt: now},
+	} {
+		if _, err := store.CreateTask(context.Background(), task, Event{Type: "task.status", State: task.State, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leases, err := store.ClaimRecoverable(context.Background(), "worker", 1, now, time.Minute)
+	if err != nil || len(leases) != 1 || leases[0].Task.ID != "high" {
+		t.Fatalf("priority lease=%+v err=%v", leases, err)
+	}
+}
+
 func TestJournalTokenRevocationExpiry(t *testing.T) {
 	store, err := OpenJournal("")
 	if err != nil {

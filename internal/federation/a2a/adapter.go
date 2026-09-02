@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
@@ -29,6 +31,7 @@ type Adapter struct {
 	profiles        []BindingProfile
 	grpcDialOptions []grpc.DialOption
 	CardVerifier    CardVerifier
+	ExtensionPolicy ExtensionPolicy
 }
 
 // SetCardVerifier installs an optional AgentCard signature policy. It is safe
@@ -36,6 +39,14 @@ type Adapter struct {
 func (a *Adapter) SetCardVerifier(verifier CardVerifier) {
 	if a != nil {
 		a.CardVerifier = verifier
+	}
+}
+
+// SetExtensionPolicy enables explicit activation checks for provider-defined
+// A2A extensions. The default policy preserves opaque declaration/propagation.
+func (a *Adapter) SetExtensionPolicy(policy ExtensionPolicy) {
+	if a != nil {
+		a.ExtensionPolicy = policy
 	}
 }
 
@@ -109,13 +120,18 @@ func (a *Adapter) Discover(ctx context.Context, cardURL string) (federation.Desc
 		skills = append(skills, string(skill.ID))
 	}
 	sort.Strings(skills)
+	extensions := make([]federation.Extension, 0, len(card.Capabilities.Extensions))
+	for _, extension := range card.Capabilities.Extensions {
+		extensions = append(extensions, federation.Extension{URI: extension.URI, Required: extension.Required})
+	}
+	sort.Slice(extensions, func(i, j int) bool { return extensions[i].URI < extensions[j].URI })
 	return federation.Descriptor{
 		Name: card.Name, ProviderVersion: card.Version,
 		ProtocolBinding: string(normalizeBinding(string(endpoint.ProtocolBinding))),
 		ProtocolVersion: string(endpoint.ProtocolVersion), Endpoint: endpoint.URL,
 		Streaming:         card.Capabilities.Streaming,
 		PushNotifications: card.Capabilities.PushNotifications,
-		SecuritySchemes:   schemes, Skills: skills,
+		SecuritySchemes:   schemes, Skills: skills, Extensions: extensions,
 		CardSignatureVerified: len(card.Signatures) > 0,
 		CardSignatureKeyID:    firstSignatureKeyID(card),
 	}, nil
@@ -206,6 +222,59 @@ func (a *Adapter) client(ctx context.Context, agent core.Agent) (*a2aclient.Clie
 	return client, a2aclient.AttachSessionID(ctx, sessionID), nil
 }
 
+func requestedExtensions(agent core.Agent, explicit []string) ([]string, error) {
+	values := explicit
+	if len(values) == 0 {
+		values = agent.Extensions
+	}
+	declared := make(map[string]struct{}, len(agent.Extensions))
+	for _, raw := range agent.Extensions {
+		if uri := strings.TrimSpace(raw); uri != "" {
+			declared[uri] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		uri := strings.TrimSpace(raw)
+		if uri == "" {
+			continue
+		}
+		parsed, err := url.Parse(uri)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+			return nil, fmt.Errorf("invalid A2A extension URI %q", raw)
+		}
+		if len(explicit) > 0 {
+			if _, ok := declared[uri]; !ok {
+				return nil, fmt.Errorf("AgentCard does not advertise requested extension %q", uri)
+			}
+		}
+		if _, ok := seen[uri]; ok {
+			continue
+		}
+		seen[uri] = struct{}{}
+		result = append(result, uri)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func attachExtensions(ctx context.Context, agent core.Agent, explicit []string) (context.Context, []string, error) {
+	extensions, err := requestedExtensions(agent, explicit)
+	if err != nil {
+		return ctx, nil, &federation.Error{Problem: core.Problem{
+			Category: "protocol", Code: "INVALID_EXTENSION_URI",
+			Message: "configured A2A extension URI is invalid",
+		}, Cause: err}
+	}
+	if len(extensions) == 0 {
+		return ctx, extensions, nil
+	}
+	return a2aclient.AttachServiceParams(ctx, a2aclient.ServiceParams{
+		a2a.SvcParamExtensions: extensions,
+	}), extensions, nil
+}
+
 func profileSelectionError(cause error) *federation.Error {
 	return &federation.Error{Problem: core.Problem{
 		Category: "protocol", Code: "VERSION_OR_BINDING_NOT_SUPPORTED",
@@ -259,10 +328,21 @@ func (a *Adapter) Send(ctx context.Context, agent core.Agent, message federation
 			return
 		}
 		defer client.Destroy()
+		callCtx, extensions, extensionErr := attachExtensions(callCtx, agent, message.Extensions)
+		if extensionErr != nil {
+			yield(federation.Observation{}, extensionErr)
+			return
+		}
+		if err := a.ExtensionPolicy.Validate(callCtx, agent, extensions, message.Metadata); err != nil {
+			yield(federation.Observation{}, &federation.Error{Problem: core.Problem{Category: "protocol", Code: "EXTENSION_NOT_ACTIVATED", Message: "requested A2A extension is not activated"}, Cause: err})
+			return
+		}
 		requestMessage := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(message.Text))
 		requestMessage.ID = message.ID
 		requestMessage.TaskID = a2a.TaskID(message.RemoteTaskID)
 		requestMessage.ContextID = message.RemoteContextID
+		requestMessage.Extensions = append([]string(nil), extensions...)
+		requestMessage.Metadata = cloneMetadata(message.Metadata)
 		config := &a2a.SendMessageConfig{
 			AcceptedOutputModes: []string{"text/plain", "application/json", "application/octet-stream"},
 			ReturnImmediately:   message.ReturnImmediately,
@@ -273,7 +353,7 @@ func (a *Adapter) Send(ctx context.Context, agent core.Agent, message federation
 				Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: message.Push.Token},
 			}
 		}
-		request := &a2a.SendMessageRequest{Message: requestMessage, Config: config}
+		request := &a2a.SendMessageRequest{Message: requestMessage, Config: config, Metadata: cloneMetadata(message.Metadata)}
 		if message.ReturnImmediately {
 			// A non-streaming SendMessage is the portable A2A fast-ack path. Some
 			// providers keep a streaming response open for the entire workflow even
@@ -326,6 +406,13 @@ func (a *Adapter) Get(ctx context.Context, agent core.Agent, remoteTaskID string
 		return federation.Observation{}, err
 	}
 	defer client.Destroy()
+	callCtx, _, err = attachExtensions(callCtx, agent, nil)
+	if err != nil {
+		return federation.Observation{}, err
+	}
+	if err := a.ExtensionPolicy.Validate(callCtx, agent, agent.Extensions, nil); err != nil {
+		return federation.Observation{}, &federation.Error{Problem: core.Problem{Category: "protocol", Code: "EXTENSION_NOT_ACTIVATED", Message: "AgentCard extension is not activated"}, Cause: err}
+	}
 	task, err := client.GetTask(callCtx, &a2a.GetTaskRequest{ID: a2a.TaskID(remoteTaskID)})
 	if err != nil {
 		return federation.Observation{}, mapError(err, false)
@@ -339,6 +426,13 @@ func (a *Adapter) Cancel(ctx context.Context, agent core.Agent, remoteTaskID str
 		return federation.Observation{}, err
 	}
 	defer client.Destroy()
+	callCtx, _, err = attachExtensions(callCtx, agent, nil)
+	if err != nil {
+		return federation.Observation{}, err
+	}
+	if err := a.ExtensionPolicy.Validate(callCtx, agent, agent.Extensions, nil); err != nil {
+		return federation.Observation{}, &federation.Error{Problem: core.Problem{Category: "protocol", Code: "EXTENSION_NOT_ACTIVATED", Message: "AgentCard extension is not activated"}, Cause: err}
+	}
 	task, err := client.CancelTask(callCtx, &a2a.CancelTaskRequest{ID: a2a.TaskID(remoteTaskID)})
 	if err != nil {
 		return federation.Observation{}, mapError(err, false)
@@ -354,6 +448,15 @@ func (a *Adapter) Subscribe(ctx context.Context, agent core.Agent, remoteTaskID 
 			return
 		}
 		defer client.Destroy()
+		callCtx, _, extensionErr := attachExtensions(callCtx, agent, nil)
+		if extensionErr != nil {
+			yield(federation.Observation{}, extensionErr)
+			return
+		}
+		if err := a.ExtensionPolicy.Validate(callCtx, agent, agent.Extensions, nil); err != nil {
+			yield(federation.Observation{}, &federation.Error{Problem: core.Problem{Category: "protocol", Code: "EXTENSION_NOT_ACTIVATED", Message: "AgentCard extension is not activated"}, Cause: err})
+			return
+		}
 		request := &a2a.SubscribeToTaskRequest{ID: a2a.TaskID(remoteTaskID)}
 		for event, eventErr := range client.SubscribeToTask(callCtx, request) {
 			if eventErr != nil {
@@ -370,6 +473,21 @@ func (a *Adapter) Subscribe(ctx context.Context, agent core.Agent, remoteTaskID 
 			}
 		}
 	}
+}
+
+func cloneMetadata(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil
+	}
+	var output map[string]any
+	if json.Unmarshal(encoded, &output) != nil {
+		return nil
+	}
+	return output
 }
 
 func observationFromEvent(event a2a.Event) (federation.Observation, error) {

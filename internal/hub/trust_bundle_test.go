@@ -2,11 +2,13 @@ package hub
 
 import (
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -152,6 +155,35 @@ func TestTrustBundleManagerFeedsOIDCAndMTLSAuthentication(t *testing.T) {
 func TestRepositoryTrustBundleExampleRemainsValid(t *testing.T) {
 	if _, err := LoadTrustBundleFile("../../trust_bundle.example.json"); err != nil {
 		t.Fatalf("load trust_bundle.example.json: %v", err)
+	}
+}
+
+func TestTrustBundleResolvesRotatedAgentCardSigningKey(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := trustBundleFixture()
+	bundle.CardKeys = map[string]string{"card-key-1": string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: encoded}))}
+	path := filepath.Join(t.TempDir(), "trust_bundle.json")
+	writeTrustBundleTestFile(t, path, bundle, 1)
+	manager, err := NewTrustBundleManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := manager.ResolveCardKey(context.Background(), &a2a.AgentCard{}, "card-key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resolved.(crypto.PublicKey); !ok {
+		t.Fatalf("resolved key type=%T", resolved)
+	}
+	if _, err := manager.ResolveCardKey(context.Background(), &a2a.AgentCard{}, "unknown"); err == nil {
+		t.Fatal("unknown card key was trusted")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,64 @@ var postgresMigrations embed.FS
 
 type PostgresStore struct {
 	pool *pgxpool.Pool
+}
+
+func (s *PostgresStore) GetWorkerControl(ctx context.Context, scope string) (WorkerControl, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(scope) == "" {
+		return WorkerControl{}, errors.New("worker control scope is required")
+	}
+	var control WorkerControl
+	if err := s.pool.QueryRow(ctx, `SELECT scope, mode, revision, updated_at FROM afh_worker_controls WHERE scope=$1`, scope).
+		Scan(&control.Scope, &control.Mode, &control.Revision, &control.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return WorkerControl{Scope: scope, Mode: "RUNNING", UpdatedAt: time.Now().UTC()}, nil
+		}
+		return WorkerControl{}, err
+	}
+	return control, nil
+}
+
+func (s *PostgresStore) SetWorkerControl(ctx context.Context, control WorkerControl, expectedRevision uint64) (WorkerControl, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(control.Scope) == "" {
+		return WorkerControl{}, errors.New("worker control scope is required")
+	}
+	mode, err := normalizeWorkerMode(control.Mode)
+	if err != nil {
+		return WorkerControl{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return WorkerControl{}, err
+	}
+	defer tx.Rollback(ctx)
+	var current WorkerControl
+	err = tx.QueryRow(ctx, `SELECT scope, mode, revision, updated_at FROM afh_worker_controls WHERE scope=$1 FOR UPDATE`, control.Scope).
+		Scan(&current.Scope, &current.Mode, &current.Revision, &current.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if expectedRevision != 0 {
+			return WorkerControl{}, ErrRevisionConflict
+		}
+		current = WorkerControl{Scope: control.Scope}
+	} else if err != nil {
+		return WorkerControl{}, err
+	} else if expectedRevision != 0 && current.Revision != expectedRevision {
+		return current, ErrRevisionConflict
+	}
+	control.Mode = mode
+	control.Revision = current.Revision + 1
+	control.UpdatedAt = time.Now().UTC()
+	if current.Revision == 0 {
+		_, err = tx.Exec(ctx, `INSERT INTO afh_worker_controls(scope, mode, revision, updated_at) VALUES ($1,$2,$3,$4)`, control.Scope, control.Mode, control.Revision, control.UpdatedAt)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE afh_worker_controls SET mode=$1, revision=$2, updated_at=$3 WHERE scope=$4`, control.Mode, control.Revision, control.UpdatedAt, control.Scope)
+	}
+	if err != nil {
+		return WorkerControl{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkerControl{}, err
+	}
+	return control, nil
 }
 
 func OpenPostgres(ctx context.Context, dataSourceName string) (*PostgresStore, error) {
@@ -493,7 +552,7 @@ func (s *PostgresStore) ListRecoverable(ctx context.Context) ([]Task, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT payload FROM afh_tasks
 		WHERE remote_task_id <> '' AND state NOT IN ('COMPLETED', 'FAILED', 'CANCELED', 'REJECTED')
-		ORDER BY tenant_id, id`)
+		ORDER BY COALESCE((payload->>'priority')::integer, 0) DESC, tenant_id, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +607,7 @@ func (s *PostgresStore) ClaimRecoverable(
 			  AND state NOT IN ('COMPLETED', 'FAILED', 'CANCELED', 'REJECTED')
 			  AND available_at <= $1
 			  AND (lease_owner = '' OR lease_expires_at <= $1)
-			ORDER BY available_at, updated_at, tenant_id, id
+			ORDER BY COALESCE((payload->>'priority')::integer, 0) DESC, available_at, updated_at, tenant_id, id
 			FOR UPDATE SKIP LOCKED
 			LIMIT $2
 		)

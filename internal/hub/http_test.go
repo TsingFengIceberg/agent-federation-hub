@@ -16,6 +16,7 @@ import (
 	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/worker"
 )
 
 func TestHTTPAgentTaskAndResumableEventFlow(t *testing.T) {
@@ -380,6 +381,87 @@ func TestHTTPHealthAndReadinessProbes(t *testing.T) {
 	response = request(t, handler, http.MethodGet, "/readyz", "", "", nil)
 	if response.Code != http.StatusOK || response.Body.String() != "ready\n" {
 		t.Fatalf("ready response=%d %q", response.Code, response.Body.String())
+	}
+}
+
+type fakeWorkflowCoordinator struct {
+	workflow core.Workflow
+	tenant   string
+}
+
+func (f *fakeWorkflowCoordinator) StartWorkflow(_ context.Context, tenant string, definition WorkflowDefinition) (WorkflowResult, error) {
+	f.tenant = tenant
+	f.workflow = core.Workflow{ID: definition.ID, TenantID: tenant, Name: definition.Name, State: core.WorkflowStateRunning, Steps: []core.WorkflowStep{{ID: definition.Steps[0].ID, State: core.TaskStateWorking}}}
+	return WorkflowResult{Workflow: f.workflow}, nil
+}
+func (f *fakeWorkflowCoordinator) ReconcileWorkflow(context.Context, string, string, bool) (WorkflowResult, error) {
+	return WorkflowResult{Workflow: f.workflow}, nil
+}
+func (f *fakeWorkflowCoordinator) ContinueWorkflow(context.Context, string, string, string) (WorkflowResult, error) {
+	return WorkflowResult{Workflow: f.workflow}, nil
+}
+func (f *fakeWorkflowCoordinator) CompensateWorkflow(context.Context, string, string) (WorkflowResult, error) {
+	return WorkflowResult{Workflow: f.workflow}, nil
+}
+func (f *fakeWorkflowCoordinator) PauseWorkflow(context.Context, string, string) (WorkflowResult, error) {
+	f.workflow.State = core.WorkflowStatePaused
+	return WorkflowResult{Workflow: f.workflow}, nil
+}
+func (f *fakeWorkflowCoordinator) ResumeWorkflow(context.Context, string, string) (WorkflowResult, error) {
+	f.workflow.State = core.WorkflowStateRunning
+	return WorkflowResult{Workflow: f.workflow}, nil
+}
+func (f *fakeWorkflowCoordinator) CancelWorkflow(context.Context, string, string) (WorkflowResult, error) {
+	f.workflow.State = core.WorkflowStateCanceled
+	return WorkflowResult{Workflow: f.workflow}, nil
+}
+func (f *fakeWorkflowCoordinator) GetWorkflow(_ context.Context, tenant, _ string) (core.Workflow, error) {
+	if tenant != f.tenant {
+		return core.Workflow{}, core.ErrNotFound
+	}
+	return f.workflow, nil
+}
+func (f *fakeWorkflowCoordinator) ListWorkflows(_ context.Context, tenant string) ([]core.Workflow, error) {
+	if tenant != f.tenant {
+		return []core.Workflow{}, nil
+	}
+	return []core.Workflow{f.workflow}, nil
+}
+
+func TestHTTPWorkflowManagementIsTenantScoped(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	service := newTestService(t, store, &fakeAdapter{})
+	coordinator := &fakeWorkflowCoordinator{}
+	handler := (&HTTPHandler{Service: service, Workflows: coordinator, WorkerGate: worker.NewGate(), Authenticator: DevelopmentAuthenticator{}, Authorizer: access.DefaultScopeAuthorizer()}).Handler()
+
+	response := request(t, handler, http.MethodPost, "/v1/workflows", `{"id":"wf-1","name":"research","steps":[{"id":"search","skill":"research","text":"collect evidence"}]}`, "tenant-a", nil)
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"wf-1"`) {
+		t.Fatalf("create workflow status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/v1/workflows/wf-1", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"tenantId":"tenant-a"`) {
+		t.Fatalf("read workflow status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/v1/workflows/wf-1", "", "tenant-b", nil)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant workflow status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/workflows/wf-1/continue", `{"text":"approve"}`, "tenant-a", nil)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("continue workflow status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/v1/workers", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mode":"RUNNING"`) {
+		t.Fatalf("worker status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/workers/pause", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mode":"PAUSED"`) {
+		t.Fatalf("worker pause status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/workers/drain", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mode":"DRAINING"`) {
+		t.Fatalf("worker drain status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

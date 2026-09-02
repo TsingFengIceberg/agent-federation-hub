@@ -16,12 +16,21 @@ import (
 	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/observability"
 )
 
 type PushDecoder func([]byte) (federation.Observation, error)
 
+type contextWorkerController interface {
+	PauseContext(context.Context) error
+	ResumeContext(context.Context) error
+	DrainContext(context.Context) error
+}
+
 type HTTPHandler struct {
 	Service           *Service
+	Workflows         WorkflowCoordinator
+	WorkerGate        WorkerController
 	DecodePush        PushDecoder
 	MaxBodyBytes      int64
 	Authenticator     Authenticator
@@ -31,6 +40,7 @@ type HTTPHandler struct {
 	Now               func() time.Time
 	EventPollInterval time.Duration
 	Metrics           func() string
+	Observability     *observability.Metrics
 	Readiness         func(context.Context) error
 	ReadinessTimeout  time.Duration
 }
@@ -81,6 +91,19 @@ func (h *HTTPHandler) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tasks/{taskID}/events", h.protected(access.ActionTaskEvents, h.getEvents))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/cancel", h.protected(access.ActionTaskCancel, h.cancelTask))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/reconcile", h.protected(access.ActionTaskReconcile, h.reconcileTask))
+	mux.HandleFunc("POST /v1/workflows", h.protected(access.ActionWorkflowCreate, h.createWorkflow))
+	mux.HandleFunc("GET /v1/workflows", h.protected(access.ActionWorkflowList, h.listWorkflows))
+	mux.HandleFunc("GET /v1/workflows/{workflowID}", h.protected(access.ActionWorkflowRead, h.getWorkflow))
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/reconcile", h.protected(access.ActionWorkflowControl, h.reconcileWorkflow))
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/continue", h.protected(access.ActionWorkflowControl, h.continueWorkflow))
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/compensate", h.protected(access.ActionWorkflowControl, h.compensateWorkflow))
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/pause", h.protected(access.ActionWorkflowControl, h.pauseWorkflow))
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/resume", h.protected(access.ActionWorkflowControl, h.resumeWorkflow))
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/cancel", h.protected(access.ActionWorkflowControl, h.cancelWorkflow))
+	mux.HandleFunc("GET /v1/workers", h.protected(access.ActionWorkerRead, h.workerStatus))
+	mux.HandleFunc("POST /v1/workers/pause", h.protected(access.ActionWorkerControl, h.pauseWorkers))
+	mux.HandleFunc("POST /v1/workers/resume", h.protected(access.ActionWorkerControl, h.resumeWorkers))
+	mux.HandleFunc("POST /v1/workers/drain", h.protected(access.ActionWorkerControl, h.drainWorkers))
 	mux.HandleFunc("POST /v1/security/revocations", h.protected(access.ActionSecurityRevoke, h.revokeToken))
 	mux.HandleFunc("GET /v1/artifacts/{artifactID}", h.protected(access.ActionArtifactRead, h.getArtifact))
 	mux.HandleFunc("GET /v1/artifacts/{artifactID}/content", h.protected(access.ActionArtifactRead, h.getArtifactContent))
@@ -146,6 +169,9 @@ func (h *HTTPHandler) revokeToken(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if h.Observability != nil {
+			h.Observability.IncHTTPRequest()
+		}
 		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
 		if requestID == "" {
 			requestID = core.NewID()
@@ -158,6 +184,9 @@ func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) htt
 		}
 		principal, err := h.Authenticator.Authenticate(r.Context(), r)
 		if err != nil {
+			if h.Observability != nil {
+				h.Observability.IncHTTPAuthDenied()
+			}
 			h.audit(r.Context(), access.AuditRecord{RequestID: requestID, Decision: "authentication_denied", Action: action, Reason: "invalid_or_missing_credential"})
 			writeProblem(w, http.StatusUnauthorized, "authentication", "UNAUTHENTICATED", "valid authentication is required")
 			return
@@ -197,6 +226,9 @@ func (h *HTTPHandler) protected(action access.Action, next http.HandlerFunc) htt
 			}
 		}
 		if err := h.Authorizer.Authorize(r.Context(), principal, access.Request{Action: action, ResourceID: resourceID}); err != nil {
+			if h.Observability != nil {
+				h.Observability.IncHTTPAuthzDenied()
+			}
 			audit.Decision = "authorization_denied"
 			audit.ResourceID = resourceID
 			audit.Reason = "insufficient_scope_or_policy"
@@ -490,6 +522,232 @@ func (h *HTTPHandler) reconcileTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+type workflowContinueInput struct {
+	Text string `json:"text"`
+}
+
+func (h *HTTPHandler) createWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	var definition WorkflowDefinition
+	if !h.decodeJSON(w, r, &definition) {
+		return
+	}
+	result, err := h.Workflows.StartWorkflow(r.Context(), tenantID, definition)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if h.Observability != nil {
+		h.Observability.IncWorkflowStarted()
+		h.Observability.IncWorkflowState(string(result.Workflow.State))
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (h *HTTPHandler) listWorkflows(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	workflows, err := h.Workflows.ListWorkflows(r.Context(), tenantID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, workflows)
+}
+
+func (h *HTTPHandler) getWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	workflow, err := h.Workflows.GetWorkflow(r.Context(), tenantID, r.PathValue("workflowID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, workflow)
+}
+
+func (h *HTTPHandler) reconcileWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	subscribe := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("subscribe")), "true")
+	result, err := h.Workflows.ReconcileWorkflow(r.Context(), tenantID, r.PathValue("workflowID"), subscribe)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *HTTPHandler) continueWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	var input workflowContinueInput
+	if !h.decodeJSON(w, r, &input) {
+		return
+	}
+	result, err := h.Workflows.ContinueWorkflow(r.Context(), tenantID, r.PathValue("workflowID"), input.Text)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (h *HTTPHandler) compensateWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	result, err := h.Workflows.CompensateWorkflow(r.Context(), tenantID, r.PathValue("workflowID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (h *HTTPHandler) pauseWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	result, err := h.Workflows.PauseWorkflow(r.Context(), tenantID, r.PathValue("workflowID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *HTTPHandler) resumeWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	result, err := h.Workflows.ResumeWorkflow(r.Context(), tenantID, r.PathValue("workflowID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *HTTPHandler) cancelWorkflow(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	result, err := h.Workflows.CancelWorkflow(r.Context(), tenantID, r.PathValue("workflowID"))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *HTTPHandler) workerStatus(w http.ResponseWriter, _ *http.Request) {
+	if h.WorkerGate == nil {
+		writeProblem(w, http.StatusNotImplemented, "worker", "WORKER_CONTROL_NOT_CONFIGURED", "worker control is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"mode": h.WorkerGate.ModeString()})
+}
+
+func (h *HTTPHandler) pauseWorkers(w http.ResponseWriter, r *http.Request) {
+	if h.WorkerGate == nil {
+		writeProblem(w, http.StatusNotImplemented, "worker", "WORKER_CONTROL_NOT_CONFIGURED", "worker control is not configured")
+		return
+	}
+	if controller, ok := h.WorkerGate.(contextWorkerController); ok {
+		if err := controller.PauseContext(r.Context()); err != nil {
+			h.writeError(w, err)
+			return
+		}
+	} else {
+		h.WorkerGate.Pause()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"mode": h.WorkerGate.ModeString()})
+}
+
+func (h *HTTPHandler) resumeWorkers(w http.ResponseWriter, r *http.Request) {
+	if h.WorkerGate == nil {
+		writeProblem(w, http.StatusNotImplemented, "worker", "WORKER_CONTROL_NOT_CONFIGURED", "worker control is not configured")
+		return
+	}
+	if controller, ok := h.WorkerGate.(contextWorkerController); ok {
+		if err := controller.ResumeContext(r.Context()); err != nil {
+			h.writeError(w, err)
+			return
+		}
+	} else {
+		h.WorkerGate.Resume()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"mode": h.WorkerGate.ModeString()})
+}
+
+func (h *HTTPHandler) drainWorkers(w http.ResponseWriter, r *http.Request) {
+	if h.WorkerGate == nil {
+		writeProblem(w, http.StatusNotImplemented, "worker", "WORKER_CONTROL_NOT_CONFIGURED", "worker control is not configured")
+		return
+	}
+	if controller, ok := h.WorkerGate.(contextWorkerController); ok {
+		if err := controller.DrainContext(r.Context()); err != nil {
+			h.writeError(w, err)
+			return
+		}
+	} else {
+		h.WorkerGate.BeginDrain()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"mode": h.WorkerGate.ModeString()})
 }
 
 func (h *HTTPHandler) push(w http.ResponseWriter, r *http.Request) {

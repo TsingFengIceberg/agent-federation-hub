@@ -26,7 +26,21 @@ type FanoutResult struct {
 }
 
 type Coordinator struct {
-	Service *hub.Service
+	Service  *hub.Service
+	Inputs   WorkflowInputStore
+	inputsMu sync.Mutex
+}
+
+func (c *Coordinator) inputStore() WorkflowInputStore {
+	if c == nil {
+		return nil
+	}
+	c.inputsMu.Lock()
+	defer c.inputsMu.Unlock()
+	if c.Inputs == nil {
+		c.Inputs = NewMemoryInputStore()
+	}
+	return c.Inputs
 }
 
 // FanOut submits independent A2A Tasks concurrently. A failure in one Agent

@@ -13,26 +13,28 @@ import (
 )
 
 type artifactOptions struct {
-	Backend              string
-	Root                 string
-	S3Endpoint           string
-	S3Region             string
-	S3Bucket             string
-	S3Prefix             string
-	S3AccessKeyReference string
-	S3SecretReference    string
-	S3SessionReference   string
-	S3Secure             bool
-	MaxBytes             int64
-	TenantMaxBytes       int64
-	TenantMaxObjects     int64
-	Retention            time.Duration
-	MIMEAllowlist        string
-	RequireClean         bool
-	Scanner              string
-	ClamAVNetwork        string
-	ClamAVAddress        string
-	AllowPrivateURIs     bool
+	Backend                string
+	Root                   string
+	S3Endpoint             string
+	S3Region               string
+	S3Bucket               string
+	S3Prefix               string
+	S3AccessKeyReference   string
+	S3SecretReference      string
+	S3SessionReference     string
+	S3Secure               bool
+	MaxBytes               int64
+	TenantMaxBytes         int64
+	TenantMaxObjects       int64
+	Retention              time.Duration
+	MIMEAllowlist          string
+	RequireClean           bool
+	Scanner                string
+	ClamAVNetwork          string
+	ClamAVAddress          string
+	AllowPrivateURIs       bool
+	EncryptionKeyReference string
+	EncryptionKeyID        string
 }
 
 func buildArtifactService(
@@ -86,6 +88,22 @@ func buildArtifactService(
 		objects = store
 	default:
 		return nil, fmt.Errorf("unsupported Artifact backend %q", options.Backend)
+	}
+	if options.EncryptionKeyReference != "" {
+		if provider == nil {
+			return nil, errors.New("Artifact encryption requires a SecretProvider")
+		}
+		if err := provider.ValidateReference(options.EncryptionKeyReference); err != nil {
+			return nil, fmt.Errorf("Artifact encryption key reference: %w", err)
+		}
+		keyValue, err := provider.Resolve(ctx, options.EncryptionKeyReference)
+		if err != nil {
+			return nil, errors.New("Artifact encryption key is unavailable")
+		}
+		if options.EncryptionKeyID == "" {
+			return nil, errors.New("Artifact encryption key ID is required when encryption is enabled")
+		}
+		objects = &artifactstore.EncryptedStore{Inner: objects, Keys: artifactstore.StaticKeyProvider{KeyID: options.EncryptionKeyID, Key: []byte(keyValue)}}
 	}
 	allowed, err := artifactstore.ParseMIMEAllowlist(options.MIMEAllowlist)
 	if err != nil {

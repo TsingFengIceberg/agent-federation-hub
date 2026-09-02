@@ -94,7 +94,10 @@ func knownAction(action Action) bool {
 		ActionOutboxList, ActionOutboxReplay, ActionOutboxPurge,
 		ActionTaskSubmit, ActionTaskContinue, ActionTaskRead, ActionTaskEvents,
 		ActionTaskCancel, ActionTaskReconcile, ActionPushConfigure,
-		ActionSecurityRevoke, ActionArtifactRead:
+		ActionSecurityRevoke, ActionArtifactRead,
+		ActionWorkflowCreate, ActionWorkflowList, ActionWorkflowRead, ActionWorkflowControl:
+		return true
+	case ActionWorkerRead, ActionWorkerControl:
 		return true
 	default:
 		return false

@@ -23,6 +23,7 @@ type InboxProcessor struct {
 	BaseBackoff   time.Duration
 	MaxBackoff    time.Duration
 	Now           func() time.Time
+	Gate          ClaimGate
 }
 
 func (p *InboxProcessor) Run(ctx context.Context) error {
@@ -44,6 +45,9 @@ func (p *InboxProcessor) Run(ctx context.Context) error {
 func (p *InboxProcessor) RunOnce(ctx context.Context) (int, error) {
 	if err := p.validate(); err != nil {
 		return 0, err
+	}
+	if p.Gate != nil && !p.Gate.AllowClaims() {
+		return 0, ErrWorkerPaused
 	}
 	leases, err := p.Store.ClaimInbox(ctx, p.WorkerID, p.batchSize(), p.now(), p.leaseDuration())
 	if err != nil {

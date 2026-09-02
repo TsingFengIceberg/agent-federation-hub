@@ -8,6 +8,10 @@ import (
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 )
 
+var ErrWorkerPaused = errors.New("artifact lifecycle worker is paused or draining")
+
+type ClaimGate interface{ AllowClaims() bool }
+
 type Lifecycle struct {
 	Metadata      core.ArtifactMetadataStore
 	Objects       ObjectStore
@@ -16,6 +20,7 @@ type Lifecycle struct {
 	LeaseDuration time.Duration
 	PollInterval  time.Duration
 	Now           func() time.Time
+	Gate          ClaimGate
 }
 
 func (w *Lifecycle) Run(ctx context.Context) error {
@@ -42,6 +47,9 @@ func (w *Lifecycle) Run(ctx context.Context) error {
 }
 
 func (w *Lifecycle) RunOnce(ctx context.Context) error {
+	if w.Gate != nil && !w.Gate.AllowClaims() {
+		return ErrWorkerPaused
+	}
 	now := w.now()
 	batch := w.BatchSize
 	if batch <= 0 {
@@ -57,7 +65,7 @@ func (w *Lifecycle) RunOnce(ctx context.Context) error {
 	}
 	var failures []error
 	for _, lease := range leases {
-		if err := w.Objects.Delete(ctx, lease.Object.StorageKey); err != nil {
+		if err := w.Objects.Delete(WithTenantKeyContext(ctx, lease.Object.TenantID), lease.Object.StorageKey); err != nil {
 			delay := time.Duration(min(lease.Attempt, 10)) * time.Minute
 			if retryErr := w.Metadata.RetryArtifactDeletion(ctx, lease, now.Add(delay)); retryErr != nil {
 				failures = append(failures, errors.Join(err, retryErr))

@@ -30,6 +30,7 @@ type OutboxProcessor struct {
 	MaxAttempts   uint32
 	Metrics       *OutboxMetrics
 	Now           func() time.Time
+	Gate          ClaimGate
 }
 
 func (p *OutboxProcessor) Run(ctx context.Context) error {
@@ -51,6 +52,9 @@ func (p *OutboxProcessor) Run(ctx context.Context) error {
 func (p *OutboxProcessor) RunOnce(ctx context.Context) (int, error) {
 	if err := p.validate(); err != nil {
 		return 0, err
+	}
+	if p.Gate != nil && !p.Gate.AllowClaims() {
+		return 0, ErrWorkerPaused
 	}
 	leases, err := p.Store.ClaimOutbox(ctx, p.WorkerID, p.batchSize(), p.now(), p.leaseDuration())
 	if err != nil {

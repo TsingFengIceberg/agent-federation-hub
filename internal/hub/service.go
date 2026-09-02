@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/observability"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 )
 
@@ -27,6 +29,8 @@ type Service struct {
 	Artifacts             *artifactstore.Service
 	Now                   func() time.Time
 	TokenGenerator        func() (string, error)
+	Metrics               *observability.Metrics
+	Tracer                observability.Tracer
 }
 
 type RegisterAgentInput struct {
@@ -50,13 +54,19 @@ type AgentRegistrationPolicy struct {
 	RequirePushNotifications bool
 	RequiredSkills           []string
 	AllowedSkills            []string
+	RequiredExtensions       []string
+	AllowedExtensions        []string
 }
 
 type SubmitTaskInput struct {
-	AgentID    string `json:"agentId,omitempty"`
-	Skill      string `json:"skill,omitempty"`
-	Text       string `json:"text"`
-	EnablePush bool   `json:"enablePush,omitempty"`
+	AgentID        string         `json:"agentId,omitempty"`
+	Skill          string         `json:"skill,omitempty"`
+	Text           string         `json:"text"`
+	EnablePush     bool           `json:"enablePush,omitempty"`
+	Priority       int            `json:"priority,omitempty"`
+	Extensions     []string       `json:"extensions,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	IdempotencyKey string         `json:"idempotencyKey,omitempty"`
 }
 
 // ResolveAgent keeps explicit agentId calls compatible while allowing callers
@@ -195,6 +205,13 @@ func (s *Service) ValidateAgentRegistration(ctx context.Context, tenantID string
 	if disallowed := disallowedSkills(policy.AllowedSkills, descriptor.Skills); len(disallowed) > 0 {
 		return federation.Descriptor{}, fmt.Errorf("remote Agent declares skills outside the allowed policy: %s", strings.Join(disallowed, ", "))
 	}
+	declaredExtensions := extensionURIs(descriptor.Extensions)
+	if missing := missingSkills(policy.RequiredExtensions, declaredExtensions); len(missing) > 0 {
+		return federation.Descriptor{}, fmt.Errorf("remote Agent does not declare required extensions: %s", strings.Join(missing, ", "))
+	}
+	if disallowed := disallowedSkills(policy.AllowedExtensions, declaredExtensions); len(disallowed) > 0 {
+		return federation.Descriptor{}, fmt.Errorf("remote Agent declares extensions outside the allowed policy: %s", strings.Join(disallowed, ", "))
+	}
 	if err := validateAgentEndpoint(descriptor.ProtocolBinding, descriptor.Endpoint, !s.AllowPrivateAgentURLs); err != nil {
 		return federation.Descriptor{}, fmt.Errorf("Agent endpoint URL: %w", err)
 	}
@@ -238,6 +255,7 @@ func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, 
 		PushNotifications: descriptor.PushNotifications,
 		SecuritySchemes:   descriptor.SecuritySchemes, CardSignatureVerified: descriptor.CardSignatureVerified,
 		CardSignatureKeyID: descriptor.CardSignatureKeyID, Skills: descriptor.Skills,
+		Extensions:         extensionURIs(descriptor.Extensions),
 		CredentialEnv:      credentialEnv,
 		RegistrationSource: input.RegistrationSource,
 		RegistryEndpoint:   input.RegistryEndpoint,
@@ -282,6 +300,75 @@ func disallowedSkills(allowed, declared []string) []string {
 	return result
 }
 
+func extensionURIs(declared []federation.Extension) []string {
+	result := make([]string, 0, len(declared))
+	for _, extension := range declared {
+		if value := strings.TrimSpace(extension.URI); value != "" {
+			result = append(result, value)
+		}
+	}
+	slices.Sort(result)
+	return result
+}
+
+func normalizeRequestExtensions(values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return nil, errors.New("A2A extension URI must not be empty")
+		}
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+			return nil, fmt.Errorf("invalid A2A extension URI %q", raw)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
+func validateExtensionMetadata(value map[string]any) (map[string]any, error) {
+	if len(value) == 0 {
+		return nil, nil
+	}
+	if len(value) > 64 {
+		return nil, errors.New("extension metadata has too many keys")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("extension metadata must be JSON: %w", err)
+	}
+	if len(encoded) > 64<<10 {
+		return nil, errors.New("extension metadata exceeds 64 KiB")
+	}
+	var clone map[string]any
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return nil, fmt.Errorf("extension metadata must be a JSON object: %w", err)
+	}
+	return clone, nil
+}
+
+func cloneAnyMap(value map[string]any) map[string]any {
+	if len(value) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var clone map[string]any
+	if json.Unmarshal(encoded, &clone) != nil {
+		return nil
+	}
+	return clone
+}
+
 func (s *Service) ListAgents(ctx context.Context, tenantID string) ([]core.Agent, error) {
 	return s.Store.ListAgents(ctx, tenantID)
 }
@@ -316,15 +403,41 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 	if strings.TrimSpace(input.Text) == "" {
 		return core.Task{}, errors.New("task text is required")
 	}
+	if input.Priority < -1000 || input.Priority > 1000 {
+		return core.Task{}, errors.New("task priority must be between -1000 and 1000")
+	}
+	extensions, err := normalizeRequestExtensions(input.Extensions)
+	if err != nil {
+		return core.Task{}, err
+	}
+	metadata, err := validateExtensionMetadata(input.Metadata)
+	if err != nil {
+		return core.Task{}, err
+	}
 	agent, err := s.ResolveAgent(ctx, tenantID, input.AgentID, input.Skill)
 	if err != nil {
 		return core.Task{}, err
 	}
+	idempotencyKey := strings.TrimSpace(input.IdempotencyKey)
+	if len(idempotencyKey) > 256 {
+		return core.Task{}, errors.New("task idempotency key exceeds 256 characters")
+	}
+	taskID, messageID := core.NewID(), core.NewID()
+	if idempotencyKey != "" {
+		stable := core.DigestString(tenantID + "\x00" + agent.ID + "\x00" + idempotencyKey)
+		taskID, messageID = "task-"+stable[:32], "message-"+stable[32:]
+	}
 	now := s.now()
 	task := core.Task{
-		ID: core.NewID(), TenantID: tenantID, AgentID: agent.ID,
-		MessageID: core.NewID(), InputDigest: core.DigestString(input.Text),
-		State: core.TaskStateSubmitted, Delivery: core.DeliveryPending,
+		ID: taskID, TenantID: tenantID, AgentID: agent.ID,
+		MessageID: messageID, IdempotencyKey: idempotencyKey, InputDigest: core.DigestJSON(struct {
+			Text       string         `json:"text"`
+			Extensions []string       `json:"extensions,omitempty"`
+			Metadata   map[string]any `json:"metadata,omitempty"`
+		}{input.Text, extensions, metadata}),
+		RequestedExtensions: extensions, ExtensionMetadata: metadata,
+		Priority: input.Priority,
+		State:    core.TaskStateSubmitted, Delivery: core.DeliveryPending,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	var push *federation.PushConfig
@@ -349,11 +462,21 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 			Token: token,
 		}
 	}
+	proposedTask := task
 	task, err = s.Store.CreateTask(ctx, task, core.Event{
 		Type: "task.submitted", Source: "hub", State: task.State, CreatedAt: now,
 	})
 	if err != nil {
+		if errors.Is(err, core.ErrConflict) && idempotencyKey != "" {
+			existing, getErr := s.Store.GetTask(ctx, tenantID, proposedTask.ID)
+			if getErr == nil && existing.IdempotencyKey == idempotencyKey && existing.InputDigest == proposedTask.InputDigest && existing.AgentID == proposedTask.AgentID {
+				return existing, nil
+			}
+		}
 		return core.Task{}, err
+	}
+	if s.Metrics != nil {
+		s.Metrics.IncTaskSubmitted()
 	}
 	task, _, err = s.Store.ApplyTask(ctx, tenantID, task.ID, "", func(current *core.Task) (core.Event, error) {
 		// Once an outbound attempt starts, a process failure can leave its
@@ -366,15 +489,27 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 		return task, err
 	}
 
-	message := federation.Message{ID: task.MessageID, Text: input.Text, Push: push, ReturnImmediately: true}
+	message := federation.Message{ID: task.MessageID, Text: input.Text, Push: push, ReturnImmediately: true,
+		Extensions: append([]string(nil), task.RequestedExtensions...), Metadata: cloneAnyMap(task.ExtensionMetadata)}
+	callContext := ctx
+	var span observability.Span
+	if s.Tracer != nil {
+		callContext, span = s.Tracer.Start(ctx, "afh.task.submit", map[string]string{
+			"afh.tenant_id": tenantID, "afh.task_id": task.ID, "afh.agent_id": agent.ID,
+		})
+	}
 	var streamErr error
-	for observation, observationErr := range s.Adapter.Send(ctx, agent, message) {
+	if span != nil {
+		defer func() { span.End(streamErr) }()
+	}
+	for observation, observationErr := range s.Adapter.Send(callContext, agent, message) {
 		if observationErr != nil {
 			streamErr = observationErr
 			break
 		}
 		task, err = s.applyObservation(ctx, task, observation)
 		if err != nil {
+			streamErr = err
 			return task, err
 		}
 	}
@@ -450,20 +585,39 @@ func (s *Service) ContinueTask(ctx context.Context, tenantID, taskID string, inp
 		RemoteTaskID:      task.RemoteTaskID,
 		RemoteContextID:   task.RemoteContextID,
 		ReturnImmediately: true,
+		Extensions:        append([]string(nil), task.RequestedExtensions...),
+		Metadata:          cloneAnyMap(task.ExtensionMetadata),
+	}
+	callContext := ctx
+	var span observability.Span
+	if s.Tracer != nil {
+		callContext, span = s.Tracer.Start(ctx, "afh.task.continue", map[string]string{
+			"afh.tenant_id": tenantID, "afh.task_id": task.ID, "afh.agent_id": agent.ID,
+		})
+	}
+	var continuationErr error
+	if span != nil {
+		defer func() { span.End(continuationErr) }()
 	}
 	seen := false
-	for observation, observationErr := range s.Adapter.Send(ctx, agent, message) {
+	for observation, observationErr := range s.Adapter.Send(callContext, agent, message) {
 		if observationErr != nil {
+			continuationErr = observationErr
 			return task, observationErr
 		}
 		seen = true
 		task, err = s.applyObservation(ctx, task, observation)
 		if err != nil {
+			continuationErr = err
 			return task, err
 		}
 	}
 	if !seen {
-		return task, errors.New("remote Agent returned no continuation result")
+		continuationErr = errors.New("remote Agent returned no continuation result")
+		return task, continuationErr
+	}
+	if span != nil {
+		span.End(nil)
 	}
 	return task, nil
 }
@@ -619,6 +773,7 @@ func (s *Service) applyObservation(ctx context.Context, task core.Task, observat
 	if observation.State != core.TaskStateUnknown || observation.RemoteTaskID != "" || observation.Problem != nil || observation.CancelRequested {
 		var err error
 		task, _, err = s.Store.ApplyTask(ctx, task.TenantID, task.ID, baseKey+":status", func(current *core.Task) (core.Event, error) {
+			previousState := current.State
 			if observation.RemoteTaskID != "" {
 				if current.RemoteTaskID != "" && current.RemoteTaskID != observation.RemoteTaskID {
 					return core.Event{}, errors.New("remote task ID changed")
@@ -635,6 +790,9 @@ func (s *Service) applyObservation(ctx context.Context, task core.Task, observat
 			applyRemoteState := shouldApplyState(*current, observation)
 			if observation.State != core.TaskStateUnknown && applyRemoteState {
 				current.State = observation.State
+				if s.Metrics != nil && current.State != previousState {
+					s.Metrics.IncTaskState(string(current.State))
+				}
 			}
 			if observation.RemoteObservedAt != nil &&
 				(current.LastRemoteObservedAt == nil || !observation.RemoteObservedAt.Before(*current.LastRemoteObservedAt)) {

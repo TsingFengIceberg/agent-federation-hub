@@ -6,9 +6,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -89,6 +91,45 @@ func TestParseBindingProfiles(t *testing.T) {
 	}
 	if _, err := ParseBindingProfiles("smtp"); err == nil {
 		t.Fatal("unsupported profile was accepted")
+	}
+}
+
+func TestRequestedExtensionsAreValidatedDeduplicatedAndSorted(t *testing.T) {
+	agent := core.Agent{Extensions: []string{"https://example.com/z", "https://example.com/a"}}
+	ctx, extensions, err := attachExtensions(context.Background(), agent, []string{"https://example.com/z", "https://example.com/z", "https://example.com/a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := fmt.Sprint(extensions); diff != "[https://example.com/a https://example.com/z]" {
+		t.Fatalf("extensions=%s", diff)
+	}
+	_ = ctx
+	if _, _, err := attachExtensions(context.Background(), agent, []string{"javascript:alert(1)"}); err == nil {
+		t.Fatal("invalid extension URI accepted")
+	}
+	if _, _, err := attachExtensions(context.Background(), agent, []string{"https://example.com/unknown"}); err == nil {
+		t.Fatal("undeclared extension accepted")
+	}
+}
+
+type extensionTestHandler struct{ called bool }
+
+func (h *extensionTestHandler) Validate(context.Context, core.Agent, map[string]any) error {
+	h.called = true
+	return nil
+}
+
+func TestExtensionPolicyCanRequireAndActivateHandlers(t *testing.T) {
+	agent := core.Agent{Extensions: []string{"https://example.com/ext"}}
+	if err := (ExtensionPolicy{RequireHandler: true}).Validate(context.Background(), agent, agent.Extensions, nil); err == nil {
+		t.Fatal("strict extension policy accepted missing handler")
+	}
+	handler := &extensionTestHandler{}
+	if err := (ExtensionPolicy{RequireHandler: true, Handlers: map[string]ExtensionHandler{"https://example.com/ext": handler}}).Validate(context.Background(), agent, agent.Extensions, map[string]any{"mode": "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if !handler.called {
+		t.Fatal("extension handler was not called")
 	}
 }
 

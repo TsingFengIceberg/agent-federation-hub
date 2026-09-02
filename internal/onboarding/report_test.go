@@ -17,10 +17,12 @@ func TestEvaluatePassesConfiguredAdmissionPolicy(t *testing.T) {
 		Name: "research", ProtocolVersion: "1.0", ProtocolBinding: "JSONRPC",
 		Streaming: true, PushNotifications: true, CardSignatureVerified: true,
 		SecuritySchemes: []string{"oauth"}, Skills: []string{"research", "summarize"},
+		Extensions: []federation.Extension{{URI: "https://example.com/ext/evidence", Required: true}},
 	}
 	checks := Evaluate(descriptor, Policy{
 		Profiles:       []a2afederation.BindingProfile{{ProtocolVersion: "1.0", Binding: a2a.TransportProtocolJSONRPC, StreamTransport: "SSE"}},
 		RequiredSkills: []string{"research"}, AllowedSkills: []string{"research", "summarize"},
+		RequiredExtensions: []string{"https://example.com/ext/evidence"}, AllowedExtensions: []string{"https://example.com/ext/evidence"},
 		RequiredSecuritySchemes: []string{"oauth"}, RequireStreaming: true,
 		RequirePush: true, RequireSignedCard: true,
 	})

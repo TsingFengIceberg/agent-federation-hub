@@ -177,7 +177,8 @@ func (s *Service) Ingest(ctx context.Context, input Input, source io.Reader) (co
 		return fail("TEMPFILE_SEEK_FAILED", err)
 	}
 	storageKey := id[:2] + "/" + id
-	if err := s.Objects.Put(ctx, storageKey, temporary, size, detected); err != nil {
+	objectContext := WithTenantKeyContext(ctx, input.TenantID)
+	if err := s.Objects.Put(objectContext, storageKey, temporary, size, detected); err != nil {
 		return fail("OBJECT_WRITE_FAILED", err)
 	}
 	status := core.ArtifactObjectAvailable
@@ -188,7 +189,7 @@ func (s *Service) Ingest(ctx context.Context, input Input, source io.Reader) (co
 		ctx, input.TenantID, id, storageKey, detected, scanStatus, status, s.now(),
 	)
 	if err != nil {
-		_ = s.Objects.Delete(ctx, storageKey)
+		_ = s.Objects.Delete(objectContext, storageKey)
 		return fail("METADATA_FINALIZE_FAILED", err)
 	}
 	return finalized, nil
@@ -210,7 +211,7 @@ func (s *Service) Open(ctx context.Context, tenantID, id string) (io.ReadCloser,
 		(s.Policy.RequireClean && object.ScanStatus != core.ArtifactScanClean) {
 		return nil, core.ArtifactObject{}, ErrUnavailable
 	}
-	reader, info, err := s.Objects.Open(ctx, object.StorageKey)
+	reader, info, err := s.Objects.Open(WithTenantKeyContext(ctx, tenantID), object.StorageKey)
 	if err != nil {
 		return nil, core.ArtifactObject{}, err
 	}

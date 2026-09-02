@@ -48,6 +48,11 @@ type WorkflowStore interface {
 	ListWorkflows(context.Context, string) ([]Workflow, error)
 }
 
+type WorkerControlStore interface {
+	GetWorkerControl(context.Context, string) (WorkerControl, error)
+	SetWorkerControl(context.Context, WorkerControl, uint64) (WorkerControl, error)
+}
+
 type LeasedStore interface {
 	Store
 	ClaimRecoverable(context.Context, string, int, time.Time, time.Duration) ([]WorkLease, error)
@@ -174,6 +179,7 @@ type journalRecord struct {
 	Workflow        *Workflow           `json:"workflow,omitempty"`
 	WorkflowEvent   *WorkflowEvent      `json:"workflowEvent,omitempty"`
 	WorkflowKey     string              `json:"workflowKey,omitempty"`
+	WorkerControl   *WorkerControl      `json:"workerControl,omitempty"`
 }
 
 type JournalStore struct {
@@ -196,6 +202,7 @@ type JournalStore struct {
 	artifactLeases  map[string]artifactLeaseState
 	workflows       map[string]Workflow
 	workflowDedup   map[string]map[string]struct{}
+	workerControls  map[string]WorkerControl
 }
 
 type JournalBackupManifest struct {
@@ -419,6 +426,7 @@ func OpenJournal(path string) (*JournalStore, error) {
 		artifactLeases:  make(map[string]artifactLeaseState),
 		workflows:       make(map[string]Workflow),
 		workflowDedup:   make(map[string]map[string]struct{}),
+		workerControls:  make(map[string]WorkerControl),
 	}
 	if path == "" {
 		return store, nil
@@ -545,6 +553,10 @@ func (s *JournalStore) applyRecord(record journalRecord) {
 				s.workflowDedup[key] = make(map[string]struct{})
 			}
 			s.workflowDedup[key][record.WorkflowEvent.DedupKey] = struct{}{}
+		}
+	case "worker_control":
+		if record.WorkerControl != nil {
+			s.workerControls[record.WorkerControl.Scope] = *record.WorkerControl
 		}
 	}
 }
@@ -828,7 +840,12 @@ func (s *JournalStore) ListRecoverable(_ context.Context) ([]Task, error) {
 			tasks = append(tasks, clone)
 		}
 	}
-	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].Priority != tasks[j].Priority {
+			return tasks[i].Priority > tasks[j].Priority
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
 	return tasks, nil
 }
 
@@ -853,7 +870,13 @@ func (s *JournalStore) ClaimRecoverable(
 		}
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := s.tasks[keys[i]], s.tasks[keys[j]]
+		if left.Priority != right.Priority {
+			return left.Priority > right.Priority
+		}
+		return keys[i] < keys[j]
+	})
 	if len(keys) > limit {
 		keys = keys[:limit]
 	}
@@ -1675,4 +1698,50 @@ func (s *JournalStore) Close() error {
 	err := s.file.Close()
 	s.file = nil
 	return err
+}
+
+func normalizeWorkerMode(mode string) (string, error) {
+	mode = strings.ToUpper(strings.TrimSpace(mode))
+	switch mode {
+	case "RUNNING", "PAUSED", "DRAINING":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported worker mode %q", mode)
+	}
+}
+
+func (s *JournalStore) GetWorkerControl(_ context.Context, scope string) (WorkerControl, error) {
+	if s == nil || strings.TrimSpace(scope) == "" {
+		return WorkerControl{}, errors.New("worker control scope is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if control, ok := s.workerControls[scope]; ok {
+		return control, nil
+	}
+	return WorkerControl{Scope: scope, Mode: "RUNNING", UpdatedAt: time.Now().UTC()}, nil
+}
+
+func (s *JournalStore) SetWorkerControl(_ context.Context, control WorkerControl, expectedRevision uint64) (WorkerControl, error) {
+	if s == nil || strings.TrimSpace(control.Scope) == "" {
+		return WorkerControl{}, errors.New("worker control scope is required")
+	}
+	mode, err := normalizeWorkerMode(control.Mode)
+	if err != nil {
+		return WorkerControl{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.workerControls[control.Scope]
+	if expectedRevision != 0 && current.Revision != expectedRevision {
+		return current, ErrRevisionConflict
+	}
+	control.Mode = mode
+	control.Revision = current.Revision + 1
+	control.UpdatedAt = time.Now().UTC()
+	if err := s.append(journalRecord{Version: 1, Kind: "worker_control", WorkerControl: &control}); err != nil {
+		return WorkerControl{}, err
+	}
+	s.workerControls[control.Scope] = control
+	return control, nil
 }

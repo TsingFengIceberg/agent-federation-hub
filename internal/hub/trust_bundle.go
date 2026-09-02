@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
 const TrustBundleVersion = 1
@@ -35,6 +37,9 @@ type TrustBundle struct {
 	ExpiresAt  time.Time                       `json:"expiresAt"`
 	Issuers    map[string]IssuerTrustProfile   `json:"issuers"`
 	Workloads  map[string]WorkloadTrustProfile `json:"workloads,omitempty"`
+	// CardKeys contains operator-distributed public keys for signed AgentCards.
+	// Private signing keys never enter the Hub or this bundle.
+	CardKeys map[string]string `json:"cardKeys,omitempty"`
 }
 
 // WorkloadTrustProfile maps one verified SPIFFE URI SAN to the Hub Principal
@@ -147,6 +152,14 @@ func (b TrustBundle) Validate() error {
 			if strings.TrimSpace(actor.Subject) == "" {
 				return fmt.Errorf("trust bundle workload %q delegation[%d] has no subject", workloadID, index)
 			}
+		}
+	}
+	for keyID, encoded := range b.CardKeys {
+		if strings.TrimSpace(keyID) == "" || len(keyID) > 256 {
+			return errors.New("trust bundle Card key IDs must be non-empty and at most 256 bytes")
+		}
+		if _, err := ParsePublicKeyPEM([]byte(encoded)); err != nil {
+			return fmt.Errorf("trust bundle Card key %q: %w", keyID, err)
 		}
 	}
 	return nil
@@ -359,6 +372,25 @@ func (m *TrustBundleManager) IssuerConfigured(issuer string) bool {
 	}
 	_, ok = bundle.Issuers[strings.TrimSpace(issuer)]
 	return ok
+}
+
+// ResolveCardKey implements the A2A CardSignatureResolver boundary using the
+// latest validated Trust Bundle snapshot. The AgentCard argument is accepted
+// for interface compatibility; key selection is by the signed JWS kid and the
+// operator-distributed bundle, never by an untrusted URL in the Card.
+func (m *TrustBundleManager) ResolveCardKey(_ context.Context, _ *a2a.AgentCard, keyID string) (crypto.PublicKey, error) {
+	if m == nil {
+		return nil, errors.New("trust bundle manager is unavailable")
+	}
+	bundle, ok := m.Snapshot()
+	if !ok {
+		return nil, errors.New("trust bundle is unavailable")
+	}
+	encoded, ok := bundle.CardKeys[strings.TrimSpace(keyID)]
+	if !ok {
+		return nil, fmt.Errorf("AgentCard signing key %q is not trusted", keyID)
+	}
+	return ParsePublicKeyPEM([]byte(encoded))
 }
 
 // Generation returns the active snapshot generation for diagnostics and

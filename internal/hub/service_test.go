@@ -120,7 +120,8 @@ func TestRegisterAgentWithPolicyChecksDiscoveredCard(t *testing.T) {
 	adapter := &fakeAdapter{descriptor: federation.Descriptor{
 		Name: "research", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0",
 		Endpoint: "https://agent.example/a2a", Streaming: true,
-		Skills: []string{"research"},
+		Skills:     []string{"research"},
+		Extensions: []federation.Extension{{URI: "https://example.com/ext/evidence", Required: true}},
 	}}
 	service := newTestService(t, store, adapter)
 	agent, err := service.RegisterAgentWithPolicy(context.Background(), "tenant-a", RegisterAgentInput{
@@ -128,13 +129,17 @@ func TestRegisterAgentWithPolicyChecksDiscoveredCard(t *testing.T) {
 	}, AgentRegistrationPolicy{
 		RequiredProtocolVersion: "1.0", RequiredProtocolBinding: "JSONRPC",
 		RequiredStreamTransport: "SSE", RequireStreaming: true,
-		RequiredSkills: []string{"research"},
+		RequiredSkills:     []string{"research"},
+		RequiredExtensions: []string{"https://example.com/ext/evidence"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(agent.Skills) != 1 || agent.Skills[0] != "research" {
 		t.Fatalf("agent skills=%v", agent.Skills)
+	}
+	if len(agent.Extensions) != 1 || agent.Extensions[0] != "https://example.com/ext/evidence" {
+		t.Fatalf("agent extensions=%v", agent.Extensions)
 	}
 
 	if _, err := service.RegisterAgentWithPolicy(context.Background(), "tenant-a", RegisterAgentInput{
@@ -176,6 +181,30 @@ func TestResolveAgentBySkillAndRefreshHealth(t *testing.T) {
 	}
 	if _, err := service.ResolveAgent(context.Background(), "tenant-a", "", "research"); err == nil {
 		t.Fatal("unhealthy Agent remained eligible for skill routing")
+	}
+}
+
+func TestSubmitTaskIdempotencyKeyDoesNotDuplicateRemoteCall(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	adapter := &fakeAdapter{descriptor: federation.Descriptor{Name: "agent", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"}, send: func(_ context.Context, _ core.Agent, message federation.Message) iter.Seq2[federation.Observation, error] {
+		return sequence(federation.Observation{RemoteTaskID: "remote-" + message.ID, RemoteContextID: "ctx-1", State: core.TaskStateCompleted, Final: true})
+	}}
+	service := newTestService(t, store, adapter)
+	registerTestAgent(t, service, "tenant-a")
+	first, err := service.SubmitTask(context.Background(), "tenant-a", SubmitTaskInput{AgentID: "agent-1", Text: "same", IdempotencyKey: "request-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.SubmitTask(context.Background(), "tenant-a", SubmitTaskInput{AgentID: "agent-1", Text: "same", IdempotencyKey: "request-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || first.RemoteTaskID != second.RemoteTaskID || adapter.sendCalls != 1 {
+		t.Fatalf("first=%+v second=%+v sendCalls=%d", first, second, adapter.sendCalls)
+	}
+	if _, err := service.SubmitTask(context.Background(), "tenant-a", SubmitTaskInput{AgentID: "agent-1", Text: "different", IdempotencyKey: "request-1"}); err == nil {
+		t.Fatal("idempotency key accepted different input")
 	}
 }
 

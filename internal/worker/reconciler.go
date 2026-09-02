@@ -25,6 +25,7 @@ type Reconciler struct {
 	MaxBackoff    time.Duration
 	Now           func() time.Time
 	Jitter        func(time.Duration) time.Duration
+	Gate          ClaimGate
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -50,6 +51,9 @@ func (r *Reconciler) Run(ctx context.Context) error {
 func (r *Reconciler) RunOnce(ctx context.Context) (int, error) {
 	if err := r.validate(); err != nil {
 		return 0, err
+	}
+	if r.Gate != nil && !r.Gate.AllowClaims() {
+		return 0, ErrWorkerPaused
 	}
 	leases, err := r.Store.ClaimRecoverable(ctx, r.WorkerID, r.batchSize(), r.now(), r.leaseDuration())
 	if err != nil {

@@ -18,8 +18,14 @@ type Descriptor struct {
 	PushNotifications     bool
 	SecuritySchemes       []string
 	Skills                []string
+	Extensions            []Extension
 	CardSignatureVerified bool
 	CardSignatureKeyID    string
+}
+
+type Extension struct {
+	URI      string
+	Required bool
 }
 
 type Message struct {
@@ -29,6 +35,13 @@ type Message struct {
 	RemoteContextID   string
 	ReturnImmediately bool
 	Push              *PushConfig
+	// Extensions are the A2A extension URIs activated for this request. The
+	// adapter must carry the same set in the service parameter and Message so
+	// providers can enforce required-extension semantics consistently.
+	Extensions []string
+	// Metadata is opaque extension metadata. The Hub validates its size and
+	// shape at the management boundary but never interprets provider semantics.
+	Metadata map[string]any
 }
 
 type PushConfig struct {
