@@ -70,7 +70,9 @@ Non-development startup requires all of the following:
 
 `TrustBundle` is the preferred unified snapshot. It is not an IdP, CA, or PDP;
 it binds identities after cryptographic authentication and is distributed by
-an operator-controlled channel. `TenantTrustDocument` remains a compatible
+an operator-controlled channel. An optional detached signature over the exact
+JSON bytes is verified before load and reload; the signing key and its
+distribution remain operator responsibilities. `TenantTrustDocument` remains a compatible
 legacy issuer-only input. Both prevent a valid token from a trusted issuer from
 asserting an arbitrary tenant. `PolicyDocument` preserves the default action
 contract while allowing operator-controlled role scopes and tenant-specific
@@ -95,7 +97,9 @@ audience, rate-limit, artifact scanner, and audit flags documented in the
 [phase-one boundary](phase-one-hub-conformance-boundary.md).
 
 Use `--trust-bundle-file` to select the unified path and optionally
-`--trust-bundle-reload-interval` for bounded polling. It cannot be combined
+`--trust-bundle-reload-interval` for bounded polling. Add
+`--trust-bundle-signature-file` and `--trust-bundle-signature-key-file` to
+enable detached signature verification. It cannot be combined
 with `--tenant-trust-file` or `--workload-identities-file`. For mTLS, the
 bundle maps verified SPIFFE URI SANs, while `--tls-client-ca-file` still
 controls certificate-chain verification.
@@ -109,6 +113,8 @@ tokens must not appear in YAML, JSON, AgentCards, Tasks, Artifacts, or logs.
   health, policy, and outage drills;
 - replace static workload-identity JSON with an operational SPIFFE/SPIRE or
   equivalent trust distribution process;
+- operate the Trust Bundle signing key through a KMS/HSM or equivalent
+  protected signing service;
 - integrate a real IdP, CA, PDP, and centralized audit retention service;
 - measure control-plane latency, circuit behavior, cache staleness, and
   cross-tenant denial under load;

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -21,6 +22,72 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+func TestTrustBundleDetachedSignatureVerification(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewTrustBundleSignatureVerifier(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"version":1,"generation":1}`)
+	signature := ed25519.Sign(private, payload)
+	encoded := []byte(base64.RawURLEncoding.EncodeToString(signature))
+	if err := verifier.Verify(payload, encoded); err != nil {
+		t.Fatalf("valid detached signature rejected: %v", err)
+	}
+	if err := verifier.Verify(append(payload, 'x'), encoded); err == nil {
+		t.Fatal("modified Trust Bundle payload was accepted")
+	}
+}
+
+func TestSignedTrustBundleManagerRejectsTamperedReload(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "trust_bundle.json")
+	signaturePath := filepath.Join(dir, "trust_bundle.sig")
+	keyPath := filepath.Join(dir, "trust_bundle.pub")
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle := trustBundleFixture()
+	payload, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundlePath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(signaturePath, []byte(base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, payload))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewSignedTrustBundleManager(bundlePath, signaturePath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Snapshot(); !ok {
+		t.Fatal("signed Trust Bundle was not loaded")
+	}
+	if err := os.WriteFile(bundlePath, append(payload, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Reload(); err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("tampered Trust Bundle reload error=%v", err)
+	}
+}
 
 func TestTrustBundleFileRejectsUnknownAndTrailingData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trust_bundle.json")

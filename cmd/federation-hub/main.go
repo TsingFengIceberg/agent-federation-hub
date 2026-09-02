@@ -53,6 +53,8 @@ func main() {
 	workloadIdentitiesFile := flag.String("workload-identities-file", "", "JSON mapping from SPIFFE workload IDs to tenant Principals")
 	tenantTrustFile := flag.String("tenant-trust-file", "", "versioned JSON issuer-to-tenant trust policy")
 	trustBundleFile := flag.String("trust-bundle-file", "", "versioned JSON OIDC issuer and SPIFFE workload trust bundle")
+	trustBundleSignatureFile := flag.String("trust-bundle-signature-file", "", "detached base64 signature over the Trust Bundle JSON")
+	trustBundleSignatureKeyFile := flag.String("trust-bundle-signature-key-file", "", "PEM public key for Trust Bundle detached signature verification")
 	trustBundleReloadInterval := flag.Duration("trust-bundle-reload-interval", 0, "optional interval for reloading the trust bundle; zero disables")
 	accessPolicyFile := flag.String("access-policy-file", "", "versioned JSON local role and action authorization policy")
 	tlsCertificateFile := flag.String("tls-cert-file", "", "PEM server certificate file")
@@ -472,7 +474,14 @@ func main() {
 		if *tenantTrustFile != "" || *workloadIdentitiesFile != "" {
 			log.Fatal("--trust-bundle-file cannot be combined with --tenant-trust-file or --workload-identities-file")
 		}
-		trustBundleManager, err = hub.NewTrustBundleManager(*trustBundleFile)
+		if (*trustBundleSignatureFile == "") != (*trustBundleSignatureKeyFile == "") {
+			log.Fatal("Trust Bundle signature and public key files must be configured together")
+		}
+		if *trustBundleSignatureFile != "" {
+			trustBundleManager, err = hub.NewSignedTrustBundleManager(*trustBundleFile, *trustBundleSignatureFile, *trustBundleSignatureKeyFile)
+		} else {
+			trustBundleManager, err = hub.NewTrustBundleManager(*trustBundleFile)
+		}
 		if err != nil {
 			log.Fatalf("trust bundle: %v", err)
 		}

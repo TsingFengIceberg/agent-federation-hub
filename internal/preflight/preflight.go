@@ -21,14 +21,16 @@ import (
 const ReportVersion = 1
 
 type Options struct {
-	AgentConfigPath  string
-	TrustBundlePath  string
-	AccessPolicyPath string
-	AuthMode         string
-	TLSCertPath      string
-	TLSKeyPath       string
-	ProfileMatrix    string
-	Now              time.Time
+	AgentConfigPath             string
+	TrustBundlePath             string
+	TrustBundleSignaturePath    string
+	TrustBundleSignatureKeyPath string
+	AccessPolicyPath            string
+	AuthMode                    string
+	TLSCertPath                 string
+	TLSKeyPath                  string
+	ProfileMatrix               string
+	Now                         time.Time
 }
 
 type Check struct {
@@ -53,7 +55,7 @@ func Run(options Options) Report {
 	}
 	report := Report{Version: ReportVersion, EvidenceStatus: "local-configuration", GeneratedAt: now.UTC(), Checks: []Check{}}
 	report.Checks = append(report.Checks, checkAgentConfig(options.AgentConfigPath)...)
-	report.Checks = append(report.Checks, checkTrustBundle(options.TrustBundlePath, now)...)
+	report.Checks = append(report.Checks, checkTrustBundle(options.TrustBundlePath, options.TrustBundleSignaturePath, options.TrustBundleSignatureKeyPath, now)...)
 	report.Checks = append(report.Checks, checkAccessPolicy(options.AccessPolicyPath)...)
 	report.Checks = append(report.Checks, checkTLS(options.AuthMode, options.TLSCertPath, options.TLSKeyPath)...)
 	report.Checks = append(report.Checks, checkProfileMatrix(options.ProfileMatrix)...)
@@ -80,18 +82,38 @@ func checkAgentConfig(path string) []Check {
 	return []Check{{ID: "agent-config", Status: "passed", Message: "Agent configuration schema and policies are valid", Evidence: "local parser"}}
 }
 
-func checkTrustBundle(path string, now time.Time) []Check {
+func checkTrustBundle(path, signaturePath, signatureKeyPath string, now time.Time) []Check {
+	if (strings.TrimSpace(signaturePath) == "") != (strings.TrimSpace(signatureKeyPath) == "") {
+		return []Check{{ID: "trust-bundle-signature", Status: "failed", Message: "Trust Bundle signature and public key paths must be supplied together"}}
+	}
 	if strings.TrimSpace(path) == "" {
+		if signaturePath != "" || signatureKeyPath != "" {
+			return []Check{{ID: "trust-bundle-signature", Status: "failed", Message: "Trust Bundle signature requires a Trust Bundle path"}}
+		}
 		return []Check{{ID: "trust-bundle", Status: "skipped", Message: "Trust Bundle path was not supplied"}}
 	}
-	bundle, err := hub.LoadTrustBundleFile(path)
+	var bundle hub.TrustBundle
+	var err error
+	if signaturePath != "" {
+		manager, managerErr := hub.NewSignedTrustBundleManager(path, signaturePath, signatureKeyPath)
+		if managerErr != nil {
+			return []Check{{ID: "trust-bundle-signature", Status: "failed", Message: managerErr.Error()}}
+		}
+		bundle, _ = manager.Snapshot()
+	} else {
+		bundle, err = hub.LoadTrustBundleFile(path)
+	}
 	if err != nil {
 		return []Check{{ID: "trust-bundle", Status: "failed", Message: err.Error()}}
 	}
 	if err := bundle.ValidateAt(now); err != nil {
 		return []Check{{ID: "trust-bundle", Status: "failed", Message: err.Error()}}
 	}
-	return []Check{{ID: "trust-bundle", Status: "passed", Message: fmt.Sprintf("Trust Bundle generation %d is valid and active", bundle.Generation), Evidence: "local parser and time-bound validation"}}
+	evidence := "local parser and time-bound validation"
+	if signaturePath != "" {
+		evidence += "; detached signature verified"
+	}
+	return []Check{{ID: "trust-bundle", Status: "passed", Message: fmt.Sprintf("Trust Bundle generation %d is valid and active", bundle.Generation), Evidence: evidence}}
 }
 
 func checkAccessPolicy(path string) []Check {

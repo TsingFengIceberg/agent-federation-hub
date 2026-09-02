@@ -219,6 +219,8 @@ func validateUniqueStrings(values []string, label string) error {
 // authentication through ValidatePrincipal/ResolveWorkload.
 type TrustBundleManager struct {
 	path       string
+	signature  string
+	verifier   *TrustBundleSignatureVerifier
 	current    atomic.Value // stores TrustBundle
 	mu         sync.Mutex
 	digest     [32]byte
@@ -228,7 +230,22 @@ type TrustBundleManager struct {
 }
 
 func NewTrustBundleManager(path string) (*TrustBundleManager, error) {
-	manager := &TrustBundleManager{path: strings.TrimSpace(path)}
+	return newTrustBundleManager(path, "", nil)
+}
+
+// NewSignedTrustBundleManager enables detached signature verification for the
+// initial snapshot and every later reload. The signature file contains a
+// base64url (or standard base64) signature over the exact JSON bytes.
+func NewSignedTrustBundleManager(path, signaturePath, publicKeyPath string) (*TrustBundleManager, error) {
+	verifier, err := loadTrustBundleSignature(signaturePath, publicKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	return newTrustBundleManager(path, signaturePath, &verifier)
+}
+
+func newTrustBundleManager(path, signaturePath string, verifier *TrustBundleSignatureVerifier) (*TrustBundleManager, error) {
+	manager := &TrustBundleManager{path: strings.TrimSpace(path), signature: strings.TrimSpace(signaturePath), verifier: verifier}
 	if manager.path == "" {
 		return nil, errors.New("trust bundle file path is required")
 	}
@@ -259,6 +276,18 @@ func (m *TrustBundleManager) Reload() (bool, error) {
 	}
 	if len(encoded) > 1<<20 {
 		return false, errors.New("trust bundle file exceeds 1 MiB")
+	}
+	if m.verifier != nil {
+		signature, readErr := os.ReadFile(m.signature)
+		if readErr != nil {
+			return false, fmt.Errorf("read trust bundle signature: %w", readErr)
+		}
+		if len(signature) > 64<<10 {
+			return false, errors.New("trust bundle signature exceeds 64 KiB")
+		}
+		if verifyErr := m.verifier.Verify(encoded, signature); verifyErr != nil {
+			return false, verifyErr
+		}
 	}
 	digest := sha256.Sum256(encoded)
 	m.mu.Lock()

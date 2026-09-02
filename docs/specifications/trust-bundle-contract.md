@@ -13,6 +13,15 @@ decision service. The bundle binds already-authenticated identities to tenants
 and policy inputs; TLS chain verification and OIDC signature verification
 remain separate runtime responsibilities.
 
+For deployments that need an integrity-authenticated configuration channel,
+the Hub supports a detached signature file. The signature is base64url (or
+standard base64) over the exact Trust Bundle JSON bytes and is verified with an
+operator-distributed PEM ECDSA, RSA, or Ed25519 public key before the initial
+load and every reload. Configure `--trust-bundle-signature-file` together with
+`--trust-bundle-signature-key-file`; configuring only one is rejected. Key
+custody, rotation, and protection of the distribution channel remain outside
+the Hub process.
+
 The Hub supports the bundle as the unified path for OIDC issuer trust and
 SPIFFE workload-to-Principal mapping. The older `tenant_trust.json` and
 `workload_identities.json` files remain compatible migration inputs, but they
@@ -97,4 +106,6 @@ rotation are separate operational procedures and require partner qualification.
 No production claim follows from a local bundle test. Production acceptance
 still requires real partner trust services, protected distribution and
 rollback procedures, centralized audit retention, outage drills, and measured
-tenant-isolation behavior.
+tenant-isolation behavior. The detached signature is an executable integrity
+check, not proof that the signing key was managed by a KMS/HSM or that the
+distribution channel is available and monitored.

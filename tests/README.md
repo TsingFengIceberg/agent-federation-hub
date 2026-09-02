@@ -27,11 +27,23 @@ The repository separates tests by the evidence they provide:
 | Conformance pins | [`conformance/`](conformance/) | no | Machine-checked protocol/SDK/TCK revision and evidence status |
 | Inspector/TCK | [`conformance/run-tck.sh`](conformance/run-tck.sh) | local TCK checkout | Repository-owned JSON-RPC/SSE SUT evidence with machine-readable waivers and explicit skipped bindings; not full multi-binding conformance |
 | Generality scenario matrix | [`scenarios/run-matrix.sh`](scenarios/run-matrix.sh) | selected | Machine-readable domain scenarios mapped to provider-opaque Hub invariants; external business scenarios remain explicitly unimplemented |
+| Foundation phase gates | [`phase-gates/run-foundation.sh`](phase-gates/run-foundation.sh) | selected | One repeatable entry point for baseline, trust, HA/DR, and A2A compatibility evidence; writes an ignored manifest and preserves external qualification skips |
 
 The deterministic layers are the regression baseline and must not depend on
 network availability, provider quotas, model output wording, or paid APIs. The
 live-provider layer is opt-in. It proves integration behavior but is not a stable
 conformance oracle.
+
+Run the first four readiness gates and retain the generated evidence locally:
+
+```bash
+GO_BIN=/path/to/go tests/phase-gates/run-foundation.sh
+```
+
+Set `A2A_TCK_DIR`, `AFH_RUN_POSTGRES_TESTS=1`, or
+`AFH_RUN_EXTERNAL_TRUST_TESTS=1` to enable the corresponding optional layers.
+The resulting `var/phase-gates/manifest.json` always records whether a check
+was passed, failed, or skipped and keeps `productionQualified` false.
 
 OTLP trace export is disabled unless `--otlp-endpoint` is configured. HTTPS is
 required by default; `--otlp-allow-http` is an explicit local-development opt-in

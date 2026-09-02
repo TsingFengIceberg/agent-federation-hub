@@ -17,6 +17,8 @@ import (
 func main() {
 	agentConfig := flag.String("agent-config", "agent_config.yaml", "Agent registration YAML; missing file is allowed")
 	trustBundle := flag.String("trust-bundle", "", "optional Trust Bundle JSON")
+	trustBundleSignature := flag.String("trust-bundle-signature", "", "optional detached Trust Bundle signature")
+	trustBundleSignatureKey := flag.String("trust-bundle-signature-key", "", "optional PEM public key for Trust Bundle signature")
 	accessPolicy := flag.String("access-policy", "", "optional access policy JSON")
 	authMode := flag.String("auth-mode", "development", "Hub authentication mode")
 	tlsCert := flag.String("tls-cert-file", "", "PEM TLS server certificate")
@@ -27,6 +29,7 @@ func main() {
 
 	report := preflight.Run(preflight.Options{
 		AgentConfigPath: *agentConfig, TrustBundlePath: *trustBundle,
+		TrustBundleSignaturePath: *trustBundleSignature, TrustBundleSignatureKeyPath: *trustBundleSignatureKey,
 		AccessPolicyPath: *accessPolicy, AuthMode: *authMode,
 		TLSCertPath: *tlsCert, TLSKeyPath: *tlsKey, ProfileMatrix: *profileMatrix,
 	})

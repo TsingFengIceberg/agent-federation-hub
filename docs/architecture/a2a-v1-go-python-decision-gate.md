@@ -34,10 +34,10 @@ The local toolchain was Go `1.25.0`, Python `3.13.9`, uv `0.12.3`, and Protobuf 
 | Python `0.3` compatibility line | pass | ITK Python `0.3` <-> Python `1.0` scenario passed over JSON-RPC and gRPC; this does not establish every cross-language legacy pairing |
 | Go SDK tests | pass | `go test ./...` passed at the tested Go SDK revision |
 | Inspector v1 AgentCard check | pass, limited | Live Go SUT AgentCard produced no Inspector validation errors; Inspector validator tests passed `49/49` |
-| TCK JSON-RPC MUST tests against the repository-owned SUT | evidence with waivers | Fixed TCK `5996b79f`: pytest `81 passed, 154 skipped, 30 deselected`; report is written by [`tests/conformance/run-tck.sh`](../../tests/conformance/run-tck.sh) |
+| TCK JSON-RPC MUST tests against the repository-owned SUT | evidence with waivers | Fixed TCK `5996b79f`: pytest `89 passed, 146 skipped, 30 deselected`; 76/16/22 MUST requirement summary; report is written by [`tests/conformance/run-tck.sh`](../../tests/conformance/run-tck.sh) |
 | Historical external Go TCK gRPC MUST run | fail / unresolved | Earlier fixture workaround produced `43 passed, 12 failed, 180 skipped, 30 deselected`; this is not the current owned SUT profile |
-| Owned SUT HTTP+JSON MUST tests | evidence with waivers | Fixed TCK `5996b79f`: pytest `73 passed, 162 skipped, 30 deselected`; the matrix records 62 PASS / 29 SKIPPED / 23 NOT TESTED MUST requirements and runs the fixture with `--binding http_json` |
-| Owned SUT gRPC MUST tests | evidence with waivers | Fixed TCK `5996b79f`: pytest `62 passed, 173 skipped, 30 deselected`; the matrix records 50 PASS / 31 SKIPPED / 33 NOT TESTED MUST requirements; a local adapter test also verifies Bearer metadata propagation |
+| Owned SUT HTTP+JSON MUST tests | evidence with waivers | Fixed TCK `5996b79f`: pytest `81 passed, 154 skipped, 30 deselected`; the matrix records 71 PASS / 20 SKIPPED / 23 NOT TESTED MUST requirements and runs the fixture with `--binding http_json` |
+| Owned SUT gRPC MUST tests | evidence with waivers | Fixed TCK `5996b79f`: pytest `71 passed, 164 skipped, 30 deselected`; the matrix records 60 PASS / 21 SKIPPED / 33 NOT TESTED MUST requirements; a local adapter test also verifies Bearer metadata propagation |
 
 Inspector performs basic structural checks and interactive diagnosis; it is not a substitute for TCK or cross-SDK tests. The ITK result proves interoperability of its traversal behaviors, not complete protocol conformance, authentication, authorization, or Hub durability.
 

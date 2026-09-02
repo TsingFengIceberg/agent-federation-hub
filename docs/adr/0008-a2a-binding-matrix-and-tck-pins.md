@@ -32,9 +32,9 @@ upstream TCK ref inspected for this baseline is
 
 | Binding | Local TCK result | Product status |
 |---|---:|---|
-| JSON-RPC + SSE | 67 MUST requirements pass, 25 skipped, 22 not tested, 0 failed | accepted with waivers |
-| HTTP+JSON + SSE | 62 MUST requirements pass, 29 skipped, 23 not tested, 0 failed | verified local, opt-in |
-| gRPC server-streaming | 50 MUST requirements pass, 31 skipped, 33 not tested, 0 failed | verified local, opt-in |
+| JSON-RPC + SSE | 76 MUST requirements pass, 16 skipped, 22 not tested, 0 failed | accepted with waivers |
+| HTTP+JSON + SSE | 71 MUST requirements pass, 20 skipped, 23 not tested, 0 failed | verified local, opt-in |
+| gRPC server-streaming | 60 MUST requirements pass, 21 skipped, 33 not tested, 0 failed | verified local, opt-in |
 
 The matrix counts above are the TCK's registered MUST requirements after
 aggregation. The selected transport's `--level must` test-case counts are also

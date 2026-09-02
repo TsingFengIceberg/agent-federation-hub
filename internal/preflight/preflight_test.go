@@ -63,3 +63,20 @@ func TestRunRejectsTrailingProfileMatrixData(t *testing.T) {
 		t.Fatalf("checks=%+v", checks)
 	}
 }
+
+func TestRunRejectsUnpairedTrustBundleSignatureFiles(t *testing.T) {
+	report := Run(Options{
+		TrustBundlePath:          "trust.json",
+		TrustBundleSignaturePath: "trust.sig",
+		AuthMode:                 "development",
+	})
+	if report.Passed {
+		t.Fatalf("unpaired Trust Bundle signature unexpectedly passed: %+v", report)
+	}
+	for _, check := range report.Checks {
+		if check.ID == "trust-bundle-signature" && check.Status == "failed" {
+			return
+		}
+	}
+	t.Fatalf("missing trust-bundle-signature failure: %+v", report.Checks)
+}
