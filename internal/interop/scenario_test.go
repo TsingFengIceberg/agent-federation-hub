@@ -58,3 +58,41 @@ func TestTaskScenarioUsesUTCStatusTimestamps(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthRequiredScenarioCanBeContinuedWithSameTaskContext(t *testing.T) {
+	initial := &a2asrv.ExecutorContext{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(ScenarioAuthRequired)),
+		TaskID:  a2a.NewTaskID(), ContextID: a2a.NewContextID(),
+	}
+	var events []a2a.Event
+	for event, err := range (ScenarioExecutor{}).Execute(context.Background(), initial) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if len(events) != 2 {
+		t.Fatalf("initial events=%d, want submitted plus AUTH_REQUIRED", len(events))
+	}
+	status, ok := events[1].(*a2a.TaskStatusUpdateEvent)
+	if !ok || status.Status.State != a2a.TaskStateAuthRequired {
+		t.Fatalf("auth event=%T %+v", events[1], events[1])
+	}
+	continued := &a2asrv.ExecutorContext{
+		Message:    a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("authorization-approved")),
+		StoredTask: &a2a.Task{ID: initial.TaskID, ContextID: initial.ContextID, Status: a2a.TaskStatus{State: a2a.TaskStateAuthRequired}},
+		TaskID:     initial.TaskID, ContextID: initial.ContextID,
+	}
+	var terminal bool
+	for event, err := range (ScenarioExecutor{}).Execute(context.Background(), continued) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value, ok := event.(*a2a.TaskStatusUpdateEvent); ok && value.Status.State == a2a.TaskStateCompleted {
+			terminal = true
+		}
+	}
+	if !terminal {
+		t.Fatal("AUTH_REQUIRED continuation did not complete")
+	}
+}

@@ -56,47 +56,65 @@ probe_agent() {
   local context_id
   local subscription_file
   local subscription_pid
+  hub_cmd=("$hub_bin" --allow-private)
 
-  "$hub_bin" --agent-card-url "$base_url" --operation discover \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation discover \
     | jq -e '.kind == "agent-card" and .card.supportedInterfaces[0].protocolVersion == "1.0"' >/dev/null
 
-  "$hub_bin" --agent-card-url "$base_url" --operation send --text message \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text message \
     | jq -e '.kind == "message" and .event.parts[0].text == "fixture message response"' >/dev/null
 
-  result=$("$hub_bin" --agent-card-url "$base_url" --operation stream --text artifact-data)
+  result=$("${hub_cmd[@]}" --agent-card-url "$base_url" --operation stream --text artifact-data)
   jq -e -s 'map(.kind) == ["task", "status-update", "artifact-update", "status-update"]' \
     <<<"$result" >/dev/null
   jq -e -s '.[2].event.artifact.parts[0].data.ok == true and .[3].event.status.state == "TASK_STATE_COMPLETED"' \
     <<<"$result" >/dev/null
 
-  "$hub_bin" --agent-card-url "$base_url" --operation send --text artifact-text \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text artifact-text \
     | jq -e '.event.artifacts[0].parts[0].text == "fixture task response: artifact-text"' >/dev/null
-  "$hub_bin" --agent-card-url "$base_url" --operation send --text artifact-file \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text artifact-file \
     | jq -e '.event.artifacts[0].parts[0].filename == "fixture.txt" and .event.artifacts[0].parts[0].raw != null' >/dev/null
-  "$hub_bin" --agent-card-url "$base_url" --operation send --text artifact-file-url \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text artifact-file-url \
     | jq -e '.event.artifacts[0].parts[0].url == "https://example.invalid/fixture.txt"' >/dev/null
 
-  result=$("$hub_bin" --agent-card-url "$base_url" --operation send --text input-required)
+  result=$("${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text input-required)
   jq -e '.event.status.state == "TASK_STATE_INPUT_REQUIRED"' <<<"$result" >/dev/null
   task_id=$(jq -r '.event.id' <<<"$result")
   context_id=$(jq -r '.event.contextId' <<<"$result")
-  "$hub_bin" --agent-card-url "$base_url" --operation send --text artifact-data \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text artifact-data \
     --task-id "$task_id" --context-id "$context_id" \
     | jq -e '.event.status.state == "TASK_STATE_COMPLETED"' >/dev/null
 
-  result=$("$hub_bin" --agent-card-url "$base_url" --operation send --text long-running --return-immediately)
+  result=$("${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text auth-required)
+  jq -e '.event.status.state == "TASK_STATE_AUTH_REQUIRED"' <<<"$result" >/dev/null
+  task_id=$(jq -r '.event.id' <<<"$result")
+  context_id=$(jq -r '.event.contextId' <<<"$result")
+  if [[ "$name" == "Python" ]]; then
+    "${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text authorization-approved \
+      --task-id "$task_id" --context-id "$context_id" \
+      | jq -e '.event.status.state == "TASK_STATE_COMPLETED"' >/dev/null
+  else
+    # The pinned Go SDK exposes AUTH_REQUIRED but does not release its local
+    # execution manager for a resumable follow-up. Verify the state without
+    # pretending that this SDK path supports continuation; INPUT_REQUIRED
+    # continuation above remains the portable Go/Python contract.
+    "${hub_cmd[@]}" --agent-card-url "$base_url" --operation get --task-id "$task_id" \
+      | jq -e '.event.status.state == "TASK_STATE_AUTH_REQUIRED"' >/dev/null
+  fi
+
+  result=$("${hub_cmd[@]}" --agent-card-url "$base_url" --operation send --text long-running --return-immediately)
   task_id=$(jq -r '.event.id' <<<"$result")
   subscription_file="$run_dir/${name,,}-subscription.ndjson"
-  "$hub_bin" --agent-card-url "$base_url" --operation subscribe \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation subscribe \
     --task-id "$task_id" >"$subscription_file" &
   subscription_pid=$!
   sleep 0.2
-  "$hub_bin" --agent-card-url "$base_url" --operation cancel --task-id "$task_id" \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation cancel --task-id "$task_id" \
     | jq -e '.event.status.state == "TASK_STATE_CANCELED"' >/dev/null
   wait "$subscription_pid"
   jq -e -s 'any(.[]; .event.status.state == "TASK_STATE_CANCELED")' \
     "$subscription_file" >/dev/null
-  "$hub_bin" --agent-card-url "$base_url" --operation get --task-id "$task_id" \
+  "${hub_cmd[@]}" --agent-card-url "$base_url" --operation get --task-id "$task_id" \
     | jq -e '.event.status.state == "TASK_STATE_CANCELED"' >/dev/null
 
   printf '%s fixture: pass\n' "$name"

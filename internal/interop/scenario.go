@@ -15,6 +15,7 @@ import (
 const (
 	ScenarioMessage       = "message"
 	ScenarioInputRequired = "input-required"
+	ScenarioAuthRequired  = "auth-required"
 	ScenarioLongRunning   = "long-running"
 )
 
@@ -41,6 +42,21 @@ func (ScenarioExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			)
 			yield(statusUpdate(execCtx, a2a.TaskStateInputRequired, message), nil)
 			return
+		}
+		if scenario == ScenarioAuthRequired {
+			// AUTH_REQUIRED is a resumable protocol state. A follow-up Message
+			// with the same Task/Context IDs is intentionally enough for this
+			// deterministic fixture; a production Provider may require an
+			// external OAuth/device-approval step before accepting it.
+			if execCtx.StoredTask == nil || execCtx.StoredTask.Status.State != a2a.TaskStateAuthRequired {
+				message := a2a.NewMessageForTask(
+					a2a.MessageRoleAgent,
+					execCtx,
+					a2a.NewTextPart("fixture requires authorization"),
+				)
+				yield(statusUpdate(execCtx, a2a.TaskStateAuthRequired, message), nil)
+				return
+			}
 		}
 
 		if !yield(statusUpdate(execCtx, a2a.TaskStateWorking, nil), nil) {

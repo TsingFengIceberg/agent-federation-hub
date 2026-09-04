@@ -73,6 +73,14 @@ class ScenarioExecutor(AgentExecutor):
             await updater.requires_input(prompt)
             return
 
+        if scenario == "auth-required":
+            if context.current_task is None or context.current_task.status.state != TaskState.TASK_STATE_AUTH_REQUIRED:
+                prompt = updater.new_agent_message(
+                    [Part(text="fixture requires authorization")]
+                )
+                await updater.requires_auth(prompt)
+                return
+
         await updater.start_work()
         if scenario == "long-running":
             try:
@@ -152,6 +160,7 @@ def create_app(public_url: str) -> FastAPI:
                     "message",
                     "task",
                     "input-required",
+                    "auth-required",
                     "long-running",
                 ],
             )

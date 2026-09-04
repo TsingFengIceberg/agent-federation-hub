@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 python_project="$repo_root/tests/interop/python-agent"
 python_bin="$python_project/.venv/bin/python"
+mock_port=${AFH_MOCK_PROVIDER_PORT:-4199}
+agent_port=${AFH_AGENT_PORT:-4103}
+agent_public_url=${AFH_AGENT_PUBLIC_URL:-http://127.0.0.1:$agent_port}
 run_dir=$(mktemp -d -t agent-federation-hub-provider-mock.XXXXXX)
 env_file="$run_dir/mock.env"
 model_config_file="$run_dir/mock-model-config.yaml"
@@ -24,19 +27,20 @@ printf 'MODEL_API_KEY=mock-secret\n' >"$env_file"
 printf '%s\n' \
   'model_api:' \
   '  protocol: openai-responses' \
-  '  base_url: http://127.0.0.1:4199/v1' \
+  "  base_url: http://127.0.0.1:$mock_port/v1" \
   '  responses_path: /responses' \
   '  model: mock-model' \
   '  api_key_env: MODEL_API_KEY' \
   '  headers: {}' \
   >"$model_config_file"
 
-"$python_bin" tests/real-api/mock_provider.py \
+
+"$python_bin" tests/real-api/mock_provider.py --port "$mock_port" \
   >"$run_dir/mock-provider.log" 2>&1 &
 provider_pid=$!
 
 attempts=0
-until curl --fail --silent http://127.0.0.1:4199/health >/dev/null; do
+until curl --fail --silent "http://127.0.0.1:$mock_port/health" >/dev/null; do
   attempts=$((attempts + 1))
   if [[ $attempts -ge 100 ]]; then
     echo "mock provider did not start; log follows" >&2
@@ -47,4 +51,5 @@ until curl --fail --silent http://127.0.0.1:4199/health >/dev/null; do
 done
 
 AFH_ENV_FILE="$env_file" AFH_MODEL_CONFIG_FILE="$model_config_file" \
+AFH_AGENT_PORT="$agent_port" AFH_AGENT_PUBLIC_URL="$agent_public_url" \
   "$repo_root/tests/real-api/run-smoke.sh"

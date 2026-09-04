@@ -18,6 +18,14 @@ run_dir=$(mktemp -d -t agent-federation-hub-live-api.XXXXXX)
 hub_bin="$run_dir/interop-hub"
 agent_pid=""
 
+# This script is deliberately a local-provider smoke. Keep its private URL
+# allowance explicit and configurable so the production CLI default remains
+# HTTPS/public-only while local tests can use loopback and non-standard ports.
+hub_args=(--allow-private)
+if [[ ${AFH_ALLOW_PRIVATE_AGENT_URLS:-1} != 1 ]]; then
+  hub_args=()
+fi
+
 cleanup() {
   if [[ -n "$agent_pid" ]]; then
     kill "$agent_pid" 2>/dev/null || true
@@ -52,8 +60,8 @@ until curl --fail --silent \
   sleep 0.1
 done
 
-result=$("$hub_bin" --agent-card-url "$public_url" \
-  --operation send --text "$prompt" --timeout "${timeout_seconds}s")
+result=$("$hub_bin" "${hub_args[@]}" --agent-card-url "$public_url" \
+	--operation send --text "$prompt" --timeout "${timeout_seconds}s")
 if ! jq -e '
     .kind == "task" and
     .event.status.state == "TASK_STATE_COMPLETED" and
@@ -64,7 +72,7 @@ if ! jq -e '
   exit 1
 fi
 
-result=$("$hub_bin" --agent-card-url "$public_url" \
+result=$("$hub_bin" "${hub_args[@]}" --agent-card-url "$public_url" \
   --operation stream --text "$stream_prompt" \
   --timeout "${timeout_seconds}s")
 if ! jq -e -s '

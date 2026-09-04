@@ -59,6 +59,66 @@ The assertions intentionally avoid exact model wording. Provider availability,
 quota, latency, and output variability make this an integration signal rather
 than a deterministic conformance test.
 
+## ca-agent and Coquo workflow smoke
+
+[`run-ca-agent-coquo-hub-smoke.sh`](run-ca-agent-coquo-hub-smoke.sh) is an
+opt-in multi-Provider workflow check. It starts the separately maintained
+ca-agent A2A server, Coquo's independently deployed A2A server, and this Hub,
+then runs the `sequential-pipeline` template. The Hub must discover and
+register both AgentCards, preserve remote Task/Context IDs, and pass the
+observed ca-agent Artifact to Coquo as public A2A content.
+
+The ca-agent leg can call its configured external model/API route, so the
+explicit authorization flag is mandatory:
+
+```bash
+AFH_ALLOW_LIVE_CA_AGENT=1 \
+GO_BIN=/path/to/go \
+tests/real-api/run-ca-agent-coquo-hub-smoke.sh
+```
+
+Coquo defaults to its labelled deterministic fixture Provider. That validates
+the process, protocol, and Artifact path, but is not evidence of a
+model-backed Coquo run. To use a preconfigured Coquo model Profile instead,
+also set `AFH_COQUO_PROFILE`; `AFH_COQUO_MODEL` may select/override the local
+route. The script inherits `XDG_CONFIG_HOME` for this mode, so it can read an
+existing Coquo profile. `AFH_COQUO_CONFIG_HOME` explicitly selects a different
+existing configuration directory. Fixture mode uses a fresh temporary
+configuration directory and never reads user profiles:
+
+```bash
+AFH_ALLOW_LIVE_CA_AGENT=1 \
+AFH_COQUO_PROFILE=local-work \
+GO_BIN=/path/to/go \
+tests/real-api/run-ca-agent-coquo-hub-smoke.sh
+```
+
+The script does not print credentials. It uses temporary runtime state and
+removes it on exit. A passing run is local integration evidence, not a claim
+of production trust qualification or general Agent compatibility.
+
+## Externally deployed Provider smoke
+
+[`run-external-providers-smoke.sh`](run-external-providers-smoke.sh) is the
+provider-agnostic path for two independently deployed A2A Providers. It does
+not start, import, or inspect either Provider's runtime. Set their public Card
+URLs and run a disposable Hub against the advertised A2A 1.0 JSON-RPC/SSE
+contract:
+
+```bash
+AFH_PROVIDER_A_CARD_URL=https://provider-a.example/.well-known/agent-card.json \
+AFH_PROVIDER_B_CARD_URL=https://provider-b.example/.well-known/agent-card.json \
+GO_BIN=/path/to/go \
+tests/real-api/run-external-providers-smoke.sh
+```
+
+For local loopback Providers only, add `AFH_ALLOW_PRIVATE_AGENT_URLS=1`.
+`AFH_EXTERNAL_PROVIDER_REPORT_ROOT=/secure/report/dir` optionally retains a
+sanitized JSON evidence report. The script checks Card discovery, independent
+registration, remote Task/Context correlation, terminal Artifacts, and tenant
+isolation. It intentionally runs the Hub in development authentication mode;
+use the trust and Gateway checks separately for production identity evidence.
+
 ## Deterministic adapter check
 
 [`run-mock-smoke.sh`](run-mock-smoke.sh) runs the same Agent and Hub path against

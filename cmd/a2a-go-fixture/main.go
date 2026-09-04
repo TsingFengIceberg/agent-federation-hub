@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	a2afederation "github.com/TsingFengIceberg/agent-federation-hub/internal/federation/a2a"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/interop"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -26,9 +27,23 @@ func main() {
 	name := flag.String("name", "Agent Federation Hub Go fixture", "Agent Card name")
 	description := flag.String("description", "Deterministic black-box A2A interoperability fixture", "Agent Card description")
 	skills := flag.String("skills", "interop-scenarios", "comma-separated AgentCard skill IDs")
+	cardSigningKeyFile := flag.String("agent-card-signing-key-file", "", "optional PEM private key used to sign the fixture AgentCard")
+	cardSigningKeyID := flag.String("agent-card-signing-key-id", "", "required key ID when signing the fixture AgentCard")
 	flag.Parse()
+	if err := validateAgentCardSigningFlags(*cardSigningKeyFile, *cardSigningKeyID); err != nil {
+		log.Fatal(err)
+	}
 
 	card := fixtureCard(*publicURL, *name, *description, splitSkills(*skills))
+	if *cardSigningKeyFile != "" {
+		signer, err := loadAgentCardSigner(*cardSigningKeyFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := a2afederation.SignAgentCard(card, signer, *cardSigningKeyID); err != nil {
+			log.Fatalf("sign fixture AgentCard: %v", err)
+		}
+	}
 	options := []a2asrv.RequestHandlerOption{a2asrv.WithCapabilityChecks(&card.Capabilities)}
 	if *pushNotifications {
 		card.Capabilities.PushNotifications = true
@@ -77,7 +92,7 @@ func fixtureCard(publicURL, name, description string, skillIDs []string) *a2a.Ag
 	for _, id := range skillIDs {
 		cardSkills = append(cardSkills, a2a.AgentSkill{
 			ID: id, Name: id, Description: "Deterministic provider skill for " + id,
-			Tags: []string{"fixture", id}, Examples: []string{"artifact-data", "artifact-file", "input-required"},
+			Tags: []string{"fixture", id}, Examples: []string{"artifact-data", "artifact-file", "input-required", "auth-required"},
 		})
 	}
 	return &a2a.AgentCard{

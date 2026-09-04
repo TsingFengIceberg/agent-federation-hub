@@ -11,8 +11,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/netpolicy"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
@@ -32,6 +34,7 @@ func main() {
 	contextID := flag.String("context-id", "", "context ID used by message continuation")
 	returnImmediately := flag.Bool("return-immediately", false, "return after the remote task is created")
 	timeout := flag.Duration("timeout", 20*time.Second, "overall operation timeout")
+	allowPrivate := flag.Bool("allow-private", false, "allow HTTP and private/local Agent URLs for development")
 	flag.Parse()
 
 	if *cardURL == "" {
@@ -40,8 +43,16 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	policy := netpolicy.HTTPSOnlyPolicy()
+	if *allowPrivate {
+		policy.AllowPrivate = true
+		policy.AllowHTTP = true
+		policy.AllowedPorts = nil
+	}
+	httpClient := netpolicy.NewHTTPClient(*timeout, nil, policy)
 
-	card, err := agentcard.DefaultResolver.Resolve(ctx, *cardURL)
+	resolver := &agentcard.Resolver{Client: httpClient}
+	card, err := resolver.Resolve(ctx, *cardURL)
 	if err != nil {
 		log.Fatalf("resolve Agent Card: %v", err)
 	}
@@ -59,6 +70,7 @@ func main() {
 	client, err := a2aclient.NewFromCard(
 		ctx,
 		card,
+		a2aclient.WithJSONRPCTransport(httpClient),
 		a2aclient.WithConfig(a2aclient.Config{
 			PreferredTransports: []a2a.TransportProtocol{a2a.TransportProtocolJSONRPC},
 		}),
@@ -98,7 +110,7 @@ func run(
 ) error {
 	switch operation {
 	case "send":
-		result, err := client.SendMessage(ctx, sendRequest(text, taskID, contextID, returnImmediately))
+		result, err := sendMessageWithRetry(ctx, client, sendRequest(text, taskID, contextID, returnImmediately))
 		if err != nil {
 			return fmt.Errorf("send message: %w", err)
 		}
@@ -147,6 +159,70 @@ func run(
 	default:
 		return fmt.Errorf("unknown --operation %q", operation)
 	}
+}
+
+// A2A servers may briefly retain an interrupted execution while their local
+// execution manager releases it. Retry only an explicitly named continuation
+// and only for that transient admission error; a new Task or an ambiguous
+// transport failure must never be replayed by this probe.
+func sendMessageWithRetry(ctx context.Context, client *a2aclient.Client, request *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	if client == nil || request == nil {
+		return nil, errors.New("A2A client and request are required")
+	}
+	return retryContinuation(ctx, request, func() (a2a.SendMessageResult, error) {
+		return client.SendMessage(ctx, request)
+	}, 20, 10*time.Millisecond, 250*time.Millisecond)
+}
+
+func retryContinuation(
+	ctx context.Context,
+	request *a2a.SendMessageRequest,
+	send func() (a2a.SendMessageResult, error),
+	maxAttempts int,
+	initialBackoff time.Duration,
+	maxBackoff time.Duration,
+) (a2a.SendMessageResult, error) {
+	if ctx == nil {
+		return nil, errors.New("continuation retry context is required")
+	}
+	if request == nil || send == nil {
+		return nil, errors.New("continuation retry request and sender are required")
+	}
+	if maxAttempts < 1 {
+		return nil, errors.New("continuation retry maxAttempts must be positive")
+	}
+	if initialBackoff < 0 || maxBackoff < 0 || maxBackoff < initialBackoff {
+		return nil, errors.New("continuation retry backoff is invalid")
+	}
+	backoff := initialBackoff
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result, err := send()
+		if err == nil || request.Message == nil || request.Message.TaskID == "" || !strings.Contains(strings.ToLower(err.Error()), "task execution is already in progress") || attempt == maxAttempts {
+			return result, err
+		}
+		if backoff == 0 {
+			continue
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+	return nil, errors.New("A2A continuation retry exhausted")
 }
 
 func sendRequest(text string, taskID string, contextID string, returnImmediately bool) *a2a.SendMessageRequest {
