@@ -5,17 +5,18 @@ package preflight
 
 import (
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/agentconfig"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/conformance"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/hub"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/netpolicy"
 )
 
 const ReportVersion = 1
@@ -23,6 +24,8 @@ const ReportVersion = 1
 type Options struct {
 	AgentConfigPath             string
 	TrustBundlePath             string
+	TrustBundleURL              string
+	TrustBundleSignatureURL     string
 	TrustBundleSignaturePath    string
 	TrustBundleSignatureKeyPath string
 	AccessPolicyPath            string
@@ -30,6 +33,13 @@ type Options struct {
 	TLSCertPath                 string
 	TLSKeyPath                  string
 	ProfileMatrix               string
+	StorageBackend              string
+	ArtifactBackend             string
+	WorkflowInputStorage        string
+	KMSURL                      string
+	ArtifactKMSKeyID            string
+	WorkflowKMSKeyID            string
+	OutboxEndpoint              string
 	Now                         time.Time
 }
 
@@ -55,9 +65,10 @@ func Run(options Options) Report {
 	}
 	report := Report{Version: ReportVersion, EvidenceStatus: "local-configuration", GeneratedAt: now.UTC(), Checks: []Check{}}
 	report.Checks = append(report.Checks, checkAgentConfig(options.AgentConfigPath)...)
-	report.Checks = append(report.Checks, checkTrustBundle(options.TrustBundlePath, options.TrustBundleSignaturePath, options.TrustBundleSignatureKeyPath, now)...)
+	report.Checks = append(report.Checks, checkTrustBundle(options.TrustBundlePath, options.TrustBundleURL, options.TrustBundleSignatureURL, options.TrustBundleSignaturePath, options.TrustBundleSignatureKeyPath, now)...)
 	report.Checks = append(report.Checks, checkAccessPolicy(options.AccessPolicyPath)...)
 	report.Checks = append(report.Checks, checkTLS(options.AuthMode, options.TLSCertPath, options.TLSKeyPath)...)
+	report.Checks = append(report.Checks, checkProductionBackends(options)...)
 	report.Checks = append(report.Checks, checkProfileMatrix(options.ProfileMatrix)...)
 	report.Passed = true
 	for _, check := range report.Checks {
@@ -67,6 +78,43 @@ func Run(options Options) Report {
 		}
 	}
 	return report
+}
+
+// checkProductionBackends validates the deployment shape required by the
+// production authentication boundary. It deliberately performs no network
+// calls: endpoint reachability and managed-service SLOs belong to the
+// deployment qualification suite. Development profiles retain the smaller
+// journal/memory/filesystem defaults.
+func checkProductionBackends(options Options) []Check {
+	if strings.TrimSpace(options.AuthMode) == "" || options.AuthMode == "development" {
+		return []Check{{ID: "production-backends", Status: "skipped", Message: "development authentication does not require managed backends"}}
+	}
+	checks := make([]Check, 0, 2)
+	if options.StorageBackend != "postgres" {
+		checks = append(checks, Check{ID: "production-storage", Status: "failed", Message: "non-development authentication requires PostgreSQL storage"})
+	}
+	if options.ArtifactBackend != "s3" {
+		checks = append(checks, Check{ID: "production-artifacts", Status: "failed", Message: "non-development authentication requires an S3-compatible Artifact backend"})
+	}
+	if options.WorkflowInputStorage != "postgres" {
+		checks = append(checks, Check{ID: "production-workflow-input", Status: "failed", Message: "non-development authentication requires the multi-instance PostgreSQL Workflow input vault"})
+	}
+	if strings.TrimSpace(options.KMSURL) == "" || strings.TrimSpace(options.ArtifactKMSKeyID) == "" || strings.TrimSpace(options.WorkflowKMSKeyID) == "" {
+		checks = append(checks, Check{ID: "production-kms", Status: "failed", Message: "non-development authentication requires an HTTPS KMS endpoint and Artifact/Workflow key IDs"})
+	} else if parsed, err := url.Parse(strings.TrimSpace(options.KMSURL)); err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		checks = append(checks, Check{ID: "production-kms", Status: "failed", Message: "KMS endpoint must be an HTTPS URL without user, query, or fragment"})
+	} else {
+		checks = append(checks, Check{ID: "production-kms", Status: "passed", Message: "KMS endpoint and tenant key IDs are configured", Evidence: "local shape check; KMS/HSM availability remains external"})
+	}
+	if strings.TrimSpace(options.OutboxEndpoint) == "" {
+		checks = append(checks, Check{ID: "production-eventing", Status: "failed", Message: "non-development authentication requires a durable Outbox endpoint"})
+	} else {
+		checks = append(checks, Check{ID: "production-eventing", Status: "passed", Message: "durable Outbox endpoint is configured", Evidence: "local shape check; broker HA/SLO remains external"})
+	}
+	if len(checks) == 0 {
+		return []Check{{ID: "production-backends", Status: "passed", Message: "managed production backend shape is configured"}}
+	}
+	return checks
 }
 
 func checkAgentConfig(path string) []Check {
@@ -82,7 +130,34 @@ func checkAgentConfig(path string) []Check {
 	return []Check{{ID: "agent-config", Status: "passed", Message: "Agent configuration schema and policies are valid", Evidence: "local parser"}}
 }
 
-func checkTrustBundle(path, signaturePath, signatureKeyPath string, now time.Time) []Check {
+func checkTrustBundle(path, bundleURL, signatureURL, signaturePath, signatureKeyPath string, now time.Time) []Check {
+	if strings.TrimSpace(bundleURL) != "" {
+		if strings.TrimSpace(path) != "" || strings.TrimSpace(signaturePath) != "" {
+			return []Check{{ID: "trust-bundle-source", Status: "failed", Message: "Trust Bundle URL cannot be combined with local Trust Bundle files"}}
+		}
+		if strings.TrimSpace(signatureURL) == "" || strings.TrimSpace(signatureKeyPath) == "" {
+			return []Check{{ID: "trust-bundle-source", Status: "failed", Message: "Trust Bundle URL requires a detached signature URL and public key"}}
+		}
+		policy := netpolicy.HTTPSOnlyPolicy()
+		bundle, bundleErr := policy.ValidateBaseURL(strings.TrimSpace(bundleURL))
+		if bundleErr != nil {
+			return []Check{{ID: "trust-bundle-source", Status: "failed", Message: fmt.Sprintf("Trust Bundle URL must be an HTTPS base URL without user, query, or fragment: %v", bundleErr)}}
+		}
+		signature, signatureErr := policy.ValidateBaseURL(strings.TrimSpace(signatureURL))
+		if signatureErr != nil {
+			return []Check{{ID: "trust-bundle-source", Status: "failed", Message: fmt.Sprintf("Trust Bundle signature URL must be an HTTPS base URL without user, query, or fragment: %v", signatureErr)}}
+		}
+		if !netpolicy.SameOrigin(bundle, signature) {
+			return []Check{{ID: "trust-bundle-source", Status: "failed", Message: "Trust Bundle URL and signature URL must use the same HTTPS origin"}}
+		}
+		if _, err := os.Stat(signatureKeyPath); err != nil {
+			return []Check{{ID: "trust-bundle-source", Status: "failed", Message: fmt.Sprintf("read Trust Bundle signing key: %v", err)}}
+		}
+		return []Check{{ID: "trust-bundle-source", Status: "passed", Message: "signed HTTPS Trust Bundle source has valid URL and key configuration", Evidence: "local shape check; network fetch and operator distribution remain external"}}
+	}
+	if strings.TrimSpace(signatureURL) != "" {
+		return []Check{{ID: "trust-bundle-source", Status: "failed", Message: "Trust Bundle signature URL requires a Trust Bundle URL"}}
+	}
 	if (strings.TrimSpace(signaturePath) == "") != (strings.TrimSpace(signatureKeyPath) == "") {
 		return []Check{{ID: "trust-bundle-signature", Status: "failed", Message: "Trust Bundle signature and public key paths must be supplied together"}}
 	}
@@ -148,32 +223,9 @@ func checkProfileMatrix(path string) []Check {
 	if strings.TrimSpace(path) == "" {
 		return []Check{{ID: "a2a-profile-matrix", Status: "skipped", Message: "A2A Profile matrix path was not supplied"}}
 	}
-	encoded, err := os.ReadFile(path)
+	matrix, err := conformance.LoadMatrix(path)
 	if err != nil {
-		return []Check{{ID: "a2a-profile-matrix", Status: "failed", Message: fmt.Sprintf("read profile matrix: %v", err)}}
+		return []Check{{ID: "a2a-profile-matrix", Status: "failed", Message: err.Error()}}
 	}
-	var matrix struct {
-		Profiles []struct {
-			Binding string `json:"binding"`
-			Status  string `json:"status"`
-			Failed  int    `json:"tckMustFailed"`
-		} `json:"profiles"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
-	if err := decoder.Decode(&matrix); err != nil {
-		return []Check{{ID: "a2a-profile-matrix", Status: "failed", Message: fmt.Sprintf("decode profile matrix: %v", err)}}
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return []Check{{ID: "a2a-profile-matrix", Status: "failed", Message: "profile matrix contains trailing data"}}
-	}
-	if len(matrix.Profiles) == 0 {
-		return []Check{{ID: "a2a-profile-matrix", Status: "failed", Message: "profile matrix contains no profiles"}}
-	}
-	for _, profile := range matrix.Profiles {
-		if profile.Binding == "" || profile.Status == "" || profile.Failed != 0 {
-			return []Check{{ID: "a2a-profile-matrix", Status: "failed", Message: "profile matrix contains an incomplete or failed profile"}}
-		}
-	}
-	return []Check{{ID: "a2a-profile-matrix", Status: "passed", Message: fmt.Sprintf("%d recorded profiles contain no MUST failures", len(matrix.Profiles)), Evidence: "repository-owned evidence file; not a complete conformance claim"}}
+	return []Check{{ID: "a2a-profile-matrix", Status: "passed", Message: fmt.Sprintf("%d recorded profiles contain no MUST failures", len(matrix.Profiles)), Evidence: "strict repository-owned evidence validation; not a complete conformance claim"}}
 }
