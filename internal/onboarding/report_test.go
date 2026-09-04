@@ -31,6 +31,17 @@ func TestEvaluatePassesConfiguredAdmissionPolicy(t *testing.T) {
 	}
 }
 
+func TestEvaluateAcceptsPatchCompatibleA2AProfile(t *testing.T) {
+	checks := Evaluate(federation.Descriptor{ProtocolVersion: "1.0.4", ProtocolBinding: "JSONRPC"}, Policy{
+		Profiles: []a2afederation.BindingProfile{{ProtocolVersion: "1.0", Binding: a2a.TransportProtocolJSONRPC, StreamTransport: "SSE"}},
+	})
+	for _, check := range checks {
+		if check.ID == "a2a-profile" && check.Status != CheckPassed {
+			t.Fatalf("patch-compatible profile check=%+v", check)
+		}
+	}
+}
+
 func TestEvaluateRejectsMissingAndDisallowedCapabilities(t *testing.T) {
 	checks := Evaluate(federation.Descriptor{ProtocolVersion: "1.0", ProtocolBinding: "HTTP_JSON", Skills: []string{"other"}}, Policy{
 		Profiles:       []a2afederation.BindingProfile{{ProtocolVersion: "1.0", Binding: a2a.TransportProtocolJSONRPC, StreamTransport: "SSE"}},

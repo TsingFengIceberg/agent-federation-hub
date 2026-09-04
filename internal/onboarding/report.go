@@ -167,7 +167,7 @@ func Evaluate(descriptor federation.Descriptor, policy Policy) []Check {
 
 func profileMatches(descriptor federation.Descriptor, profiles []a2afederation.BindingProfile) bool {
 	for _, profile := range profiles {
-		if profile.ProtocolVersion == descriptor.ProtocolVersion && strings.EqualFold(normalizeBinding(string(profile.Binding)), normalizeBinding(descriptor.ProtocolBinding)) {
+		if a2afederation.ProtocolVersionsCompatible(descriptor.ProtocolVersion, profile.ProtocolVersion) && strings.EqualFold(normalizeBinding(string(profile.Binding)), normalizeBinding(descriptor.ProtocolBinding)) {
 			return true
 		}
 	}
