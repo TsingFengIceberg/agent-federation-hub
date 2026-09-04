@@ -39,6 +39,17 @@ func NewTrustBundleSignatureVerifier(publicKeyPEM []byte) (TrustBundleSignatureV
 	}
 }
 
+func loadTrustBundlePublicKey(path string) (TrustBundleSignatureVerifier, error) {
+	if strings.TrimSpace(path) == "" {
+		return TrustBundleSignatureVerifier{}, errors.New("trust bundle signing public key path is required")
+	}
+	encodedKey, err := os.ReadFile(path)
+	if err != nil {
+		return TrustBundleSignatureVerifier{}, fmt.Errorf("read trust bundle signing key: %w", err)
+	}
+	return NewTrustBundleSignatureVerifier(encodedKey)
+}
+
 func (v TrustBundleSignatureVerifier) Verify(payload, encodedSignature []byte) error {
 	if v.Key == nil {
 		return errors.New("trust bundle signing key is not configured")
@@ -77,9 +88,5 @@ func loadTrustBundleSignature(path, keyPath string) (TrustBundleSignatureVerifie
 	if strings.TrimSpace(path) == "" || strings.TrimSpace(keyPath) == "" {
 		return TrustBundleSignatureVerifier{}, errors.New("trust bundle signature and public key paths are required together")
 	}
-	encodedKey, err := os.ReadFile(keyPath)
-	if err != nil {
-		return TrustBundleSignatureVerifier{}, fmt.Errorf("read trust bundle signing key: %w", err)
-	}
-	return NewTrustBundleSignatureVerifier(encodedKey)
+	return loadTrustBundlePublicKey(keyPath)
 }

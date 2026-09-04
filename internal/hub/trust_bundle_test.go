@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ed25519"
@@ -10,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -251,6 +253,123 @@ func TestTrustBundleResolvesRotatedAgentCardSigningKey(t *testing.T) {
 	}
 	if _, err := manager.ResolveCardKey(context.Background(), &a2a.AgentCard{}, "unknown"); err == nil {
 		t.Fatal("unknown card key was trusted")
+	}
+}
+
+func TestTrustBundleCardKeyLifecycleRejectsExpiredAndRevokedKeys(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	bundle := trustBundleFixture()
+	bundle.CardKeys = map[string]string{"card-key-1": string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: encoded}))}
+	bundle.CardKeyPolicies = map[string]CardKeyPolicy{"card-key-1": {
+		NotBefore: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
+	}}
+	path := filepath.Join(t.TempDir(), "trust_bundle.json")
+	writeTrustBundleTestFile(t, path, bundle, 1)
+	manager, err := NewTrustBundleManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.Now = func() time.Time { return now }
+	if _, err := manager.ResolveCardKey(context.Background(), &a2a.AgentCard{}, "card-key-1"); err != nil {
+		t.Fatalf("active Card key rejected: %v", err)
+	}
+	manager.Now = func() time.Time { return now.Add(2 * time.Hour) }
+	if _, err := manager.ResolveCardKey(context.Background(), &a2a.AgentCard{}, "card-key-1"); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired Card key error=%v", err)
+	}
+	bundle.Generation = 2
+	bundle.CardKeyPolicies["card-key-1"] = CardKeyPolicy{NotBefore: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), Revoked: true}
+	writeTrustBundleTestFile(t, path, bundle, 2)
+	manager.Now = func() time.Time { return now }
+	if _, err := manager.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ResolveCardKey(context.Background(), &a2a.AgentCard{}, "card-key-1"); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("revoked Card key error=%v", err)
+	}
+}
+
+func TestTrustBundleRejectsCardKeyPolicyWithoutKey(t *testing.T) {
+	bundle := trustBundleFixture()
+	bundle.CardKeyPolicies = map[string]CardKeyPolicy{"missing": {
+		NotBefore: bundle.NotBefore, ExpiresAt: bundle.ExpiresAt,
+	}}
+	if err := bundle.Validate(); err == nil || !strings.Contains(err.Error(), "corresponding cardKeys") {
+		t.Fatalf("orphan Card key policy error=%v", err)
+	}
+}
+
+func TestHTTPSignedTrustBundleSourceFetchesAuthenticatedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "bundle.pub")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundlePayload, err := json.Marshal(trustBundleFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	signaturePayload := []byte(base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, bundlePayload)))
+	source, err := NewHTTPSignedTrustBundleSource("https://distribution.example/bundle", "https://distribution.example/signature", func(context.Context) (string, error) {
+		return "distribution-token", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get("Authorization") != "Bearer distribution-token" {
+			return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader("unauthorized")), Header: make(http.Header), Request: request}, nil
+		}
+		body := bundlePayload
+		if request.URL.Path == "/signature" {
+			body = signaturePayload
+		}
+		if request.URL.Path != "/bundle" && request.URL.Path != "/signature" {
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: make(http.Header), Request: request}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header), Request: request}, nil
+	})}
+	manager, err := NewSignedTrustBundleManagerFromSource(source, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation, ok := manager.Generation(); !ok || generation != 1 {
+		t.Fatalf("generation=%d present=%v", generation, ok)
+	}
+	if _, _, err := source.Fetch(context.Background()); err != nil {
+		t.Fatalf("source fetch failed: %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func TestHTTPSignedTrustBundleSourceRequiresHTTPSAndSignature(t *testing.T) {
+	if _, err := NewHTTPSignedTrustBundleSource("http://bundle.example", "https://sig.example", nil); err == nil {
+		t.Fatal("HTTP Trust Bundle URL was accepted")
+	}
+	if _, err := NewHTTPSignedTrustBundleSource("https://bundle.example?a=1", "https://sig.example", nil); err == nil {
+		t.Fatal("query-bearing Trust Bundle URL was accepted")
+	}
+	if _, err := NewHTTPSignedTrustBundleSource("https://bundle.example/bundle", "https://other.example/signature", nil); err == nil || !strings.Contains(err.Error(), "same HTTPS origin") {
+		t.Fatalf("cross-origin Trust Bundle URLs were accepted: %v", err)
 	}
 }
 

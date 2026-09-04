@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/access"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/netpolicy"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/transport"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
@@ -40,6 +43,135 @@ type TrustBundle struct {
 	// CardKeys contains operator-distributed public keys for signed AgentCards.
 	// Private signing keys never enter the Hub or this bundle.
 	CardKeys map[string]string `json:"cardKeys,omitempty"`
+	// CardKeyPolicies optionally constrains the lifecycle of each Card signing
+	// key. Omitting a policy preserves the original key-map semantics; when a
+	// policy is present, verification fails closed outside its validity window
+	// or after revocation.
+	CardKeyPolicies map[string]CardKeyPolicy `json:"cardKeyPolicies,omitempty"`
+}
+
+// CardKeyPolicy is an operator-declared validity and revocation window for an
+// AgentCard signing key. It intentionally carries no private key material.
+type CardKeyPolicy struct {
+	NotBefore time.Time `json:"notBefore"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	Revoked   bool      `json:"revoked,omitempty"`
+}
+
+// TrustBundleSource is the distribution boundary for operator-owned trust
+// snapshots. Implementations return the exact JSON bytes and, when the
+// manager has a verifier configured, the detached signature bytes for those
+// same bytes. The source never receives private signing material.
+type TrustBundleSource interface {
+	Fetch(context.Context) (bundle, signature []byte, err error)
+}
+
+// HTTPSignedTrustBundleSource fetches a Trust Bundle and its detached
+// signature over an operator-authenticated HTTPS connection. It is intended
+// for a real control-plane distribution service; local files remain useful
+// for development and offline recovery.
+type HTTPSignedTrustBundleSource struct {
+	BundleURL        string
+	SignatureURL     string
+	Client           *http.Client
+	URLPolicy        netpolicy.Policy
+	Bearer           func(context.Context) (string, error)
+	MaxResponseBytes int64
+}
+
+// SetHTTPClientWithPolicy installs custom TLS/pooling while retaining the
+// caller's explicit environment policy for the distribution endpoint.
+func (s *HTTPSignedTrustBundleSource) SetHTTPClientWithPolicy(client *http.Client, policy netpolicy.Policy) {
+	if s != nil && client != nil {
+		s.URLPolicy = policy
+		s.Client = netpolicy.WithURLPolicy(client, nil, policy)
+	}
+}
+
+func NewHTTPSignedTrustBundleSource(bundleURL, signatureURL string, bearer func(context.Context) (string, error)) (*HTTPSignedTrustBundleSource, error) {
+	policy := netpolicy.HTTPSBaseURLPolicy()
+	bundle, err := policy.ValidateBaseURL(strings.TrimSpace(bundleURL))
+	if err != nil {
+		return nil, fmt.Errorf("Trust Bundle URL must be an HTTPS base URL without user, query, or fragment: %w", err)
+	}
+	signature, err := policy.ValidateBaseURL(strings.TrimSpace(signatureURL))
+	if err != nil {
+		return nil, fmt.Errorf("Trust Bundle signature URL must be an HTTPS base URL without user, query, or fragment: %w", err)
+	}
+	if !netpolicy.SameOrigin(bundle, signature) {
+		return nil, errors.New("Trust Bundle URL and signature URL must use the same HTTPS origin")
+	}
+	return &HTTPSignedTrustBundleSource{
+		BundleURL:    strings.TrimRight(bundle.String(), "/"),
+		SignatureURL: strings.TrimRight(signature.String(), "/"),
+		Bearer:       bearer, Client: netpolicy.NewHTTPClient(10*time.Second, nil, policy), URLPolicy: policy, MaxResponseBytes: 1 << 20,
+	}, nil
+}
+
+func (s *HTTPSignedTrustBundleSource) Fetch(ctx context.Context) ([]byte, []byte, error) {
+	if s == nil || s.BundleURL == "" || s.SignatureURL == "" {
+		return nil, nil, errors.New("HTTPS Trust Bundle source is not configured")
+	}
+	bundle, err := s.fetch(ctx, s.BundleURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch Trust Bundle: %w", err)
+	}
+	signature, err := s.fetch(ctx, s.SignatureURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch Trust Bundle signature: %w", err)
+	}
+	return bundle, signature, nil
+}
+
+func (s *HTTPSignedTrustBundleSource) fetch(ctx context.Context, endpoint string) ([]byte, error) {
+	if _, err := s.urlPolicy().ValidateBaseURL(endpoint); err != nil {
+		return nil, fmt.Errorf("validate Trust Bundle distribution URL: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if s.Bearer != nil {
+		token, resolveErr := s.Bearer(ctx)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		if strings.TrimSpace(token) == "" {
+			return nil, errors.New("Trust Bundle credential is empty")
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := s.Client
+	if client == nil {
+		client = netpolicy.NewHTTPClient(10*time.Second, nil, s.urlPolicy())
+	} else {
+		// Distribution callers may install custom roots or mTLS, but the custom
+		// transport cannot opt out of the outbound URL/DNS policy.
+		client = netpolicy.WithURLPolicy(client, nil, s.urlPolicy())
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
+	}
+	encoded, err := transport.ReadBounded(response.Body, s.MaxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) == 0 {
+		return nil, errors.New("response is empty")
+	}
+	return encoded, nil
+}
+
+func (s *HTTPSignedTrustBundleSource) urlPolicy() netpolicy.Policy {
+	if s != nil && (s.URLPolicy.AllowPrivate || s.URLPolicy.AllowHTTP || s.URLPolicy.AllowedPorts != nil || s.URLPolicy.MaxRedirects != 0) {
+		return s.URLPolicy
+	}
+	return netpolicy.HTTPSBaseURLPolicy()
 }
 
 // WorkloadTrustProfile maps one verified SPIFFE URI SAN to the Hub Principal
@@ -162,6 +294,17 @@ func (b TrustBundle) Validate() error {
 			return fmt.Errorf("trust bundle Card key %q: %w", keyID, err)
 		}
 	}
+	for keyID, policy := range b.CardKeyPolicies {
+		if strings.TrimSpace(keyID) == "" || len(keyID) > 256 {
+			return errors.New("trust bundle Card key policy IDs must be non-empty and at most 256 bytes")
+		}
+		if _, exists := b.CardKeys[keyID]; !exists {
+			return fmt.Errorf("trust bundle Card key policy %q has no corresponding cardKeys entry", keyID)
+		}
+		if policy.NotBefore.IsZero() || policy.ExpiresAt.IsZero() || !policy.ExpiresAt.After(policy.NotBefore) {
+			return fmt.Errorf("trust bundle Card key policy %q requires an ordered notBefore and expiresAt", keyID)
+		}
+	}
 	return nil
 }
 
@@ -220,6 +363,7 @@ func validateUniqueStrings(values []string, label string) error {
 type TrustBundleManager struct {
 	path       string
 	signature  string
+	source     TrustBundleSource
 	verifier   *TrustBundleSignatureVerifier
 	current    atomic.Value // stores TrustBundle
 	mu         sync.Mutex
@@ -242,6 +386,25 @@ func NewSignedTrustBundleManager(path, signaturePath, publicKeyPath string) (*Tr
 		return nil, err
 	}
 	return newTrustBundleManager(path, signaturePath, &verifier)
+}
+
+// NewSignedTrustBundleManagerFromSource creates a manager backed by a
+// protected distribution source. A detached signature verifier is mandatory
+// so a successful HTTPS response cannot be mistaken for an authorized trust
+// snapshot merely because the transport was encrypted.
+func NewSignedTrustBundleManagerFromSource(source TrustBundleSource, publicKeyPath string) (*TrustBundleManager, error) {
+	if source == nil {
+		return nil, errors.New("Trust Bundle source is required")
+	}
+	verifier, err := loadTrustBundlePublicKey(publicKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	manager := &TrustBundleManager{source: source, verifier: &verifier}
+	if _, err := manager.Reload(); err != nil {
+		return nil, err
+	}
+	return manager, nil
 }
 
 func newTrustBundleManager(path, signaturePath string, verifier *TrustBundleSignatureVerifier) (*TrustBundleManager, error) {
@@ -267,20 +430,34 @@ func (m *TrustBundleManager) Snapshot() (TrustBundle, bool) {
 }
 
 func (m *TrustBundleManager) Reload() (bool, error) {
+	return m.reload(context.Background())
+}
+
+func (m *TrustBundleManager) reload(ctx context.Context) (bool, error) {
 	if m == nil || m.path == "" {
-		return false, errors.New("trust bundle manager is not configured")
+		if m == nil || m.source == nil {
+			return false, errors.New("trust bundle manager is not configured")
+		}
 	}
-	encoded, err := os.ReadFile(m.path)
+	var encoded, signature []byte
+	var err error
+	if m.source != nil {
+		encoded, signature, err = m.source.Fetch(ctx)
+	} else {
+		encoded, err = os.ReadFile(m.path)
+	}
 	if err != nil {
-		return false, fmt.Errorf("read trust bundle file: %w", err)
+		return false, err
 	}
 	if len(encoded) > 1<<20 {
 		return false, errors.New("trust bundle file exceeds 1 MiB")
 	}
 	if m.verifier != nil {
-		signature, readErr := os.ReadFile(m.signature)
-		if readErr != nil {
-			return false, fmt.Errorf("read trust bundle signature: %w", readErr)
+		if m.source == nil {
+			signature, err = os.ReadFile(m.signature)
+			if err != nil {
+				return false, fmt.Errorf("read trust bundle signature: %w", err)
+			}
 		}
 		if len(signature) > 64<<10 {
 			return false, errors.New("trust bundle signature exceeds 64 KiB")
@@ -320,7 +497,7 @@ func (m *TrustBundleManager) Watch(ctx context.Context, interval time.Duration, 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := m.Reload(); err != nil && report != nil {
+			if _, err := m.reload(ctx); err != nil && report != nil {
 				report(err)
 			}
 		}
@@ -415,9 +592,25 @@ func (m *TrustBundleManager) ResolveCardKey(_ context.Context, _ *a2a.AgentCard,
 	if !ok {
 		return nil, errors.New("trust bundle is unavailable")
 	}
-	encoded, ok := bundle.CardKeys[strings.TrimSpace(keyID)]
+	if err := bundle.ValidateAt(m.now()); err != nil {
+		return nil, fmt.Errorf("trust bundle is not active: %w", err)
+	}
+	keyID = strings.TrimSpace(keyID)
+	encoded, ok := bundle.CardKeys[keyID]
 	if !ok {
 		return nil, fmt.Errorf("AgentCard signing key %q is not trusted", keyID)
+	}
+	if policy, constrained := bundle.CardKeyPolicies[keyID]; constrained {
+		now := m.now()
+		if policy.Revoked {
+			return nil, fmt.Errorf("AgentCard signing key %q is revoked", keyID)
+		}
+		if now.Before(policy.NotBefore.UTC()) {
+			return nil, fmt.Errorf("AgentCard signing key %q is not active yet", keyID)
+		}
+		if !now.Before(policy.ExpiresAt.UTC()) {
+			return nil, fmt.Errorf("AgentCard signing key %q has expired", keyID)
+		}
 	}
 	return ParsePublicKeyPEM([]byte(encoded))
 }
@@ -458,6 +651,14 @@ func cloneTrustBundle(bundle TrustBundle) TrustBundle {
 		profile.Roles = append([]string(nil), profile.Roles...)
 		profile.Delegation = append([]access.DelegatedActor(nil), profile.Delegation...)
 		clone.Workloads[workload] = profile
+	}
+	clone.CardKeys = make(map[string]string, len(bundle.CardKeys))
+	for keyID, encoded := range bundle.CardKeys {
+		clone.CardKeys[keyID] = encoded
+	}
+	clone.CardKeyPolicies = make(map[string]CardKeyPolicy, len(bundle.CardKeyPolicies))
+	for keyID, policy := range bundle.CardKeyPolicies {
+		clone.CardKeyPolicies[keyID] = policy
 	}
 	return clone
 }

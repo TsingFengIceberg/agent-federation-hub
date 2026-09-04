@@ -16,6 +16,13 @@
   "cardKeys": {
     "partner-card-2026": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAGACEAhRye++67QpxEY88Cqyv3N23bbW0PxG8RqG1zh4=\n-----END PUBLIC KEY-----"
   },
+  "cardKeyPolicies": {
+    "partner-card-2026": {
+      "notBefore": "2026-01-01T00:00:00Z",
+      "expiresAt": "2027-01-01T00:00:00Z",
+      "revoked": false
+    }
+  },
   "workloads": {
     "spiffe://partner.example/ns/prod/sa/competitive-analysis": {
       "subject": "competitive-analysis-agent",
