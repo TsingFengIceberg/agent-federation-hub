@@ -61,7 +61,8 @@ func TestLoadFileAndRegistrationPolicy(t *testing.T) {
 	}
 	policy := file.EnabledAgents()[0].RegistrationPolicy(file.Defaults)
 	if policy.RequiredProtocolVersion != "1.0" || policy.RequiredProtocolBinding != "JSONRPC" ||
-		!policy.RequireStreaming || len(policy.RequiredSkills) != 1 || policy.RequiredSkills[0] != "research" {
+		!policy.RequireStreaming || len(policy.RequiredSkills) != 1 || policy.RequiredSkills[0] != "research" ||
+		len(policy.RequiredProfiles) != 1 || string(policy.RequiredProfiles[0].Binding) != "JSONRPC" {
 		t.Fatalf("policy=%+v", policy)
 	}
 }

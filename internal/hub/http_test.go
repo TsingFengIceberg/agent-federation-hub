@@ -394,10 +394,16 @@ func (f *fakeWorkflowCoordinator) StartWorkflow(_ context.Context, tenant string
 	f.workflow = core.Workflow{ID: definition.ID, TenantID: tenant, Name: definition.Name, State: core.WorkflowStateRunning, Steps: []core.WorkflowStep{{ID: definition.Steps[0].ID, State: core.TaskStateWorking}}}
 	return WorkflowResult{Workflow: f.workflow}, nil
 }
+func (f *fakeWorkflowCoordinator) ListWorkflowTemplates() []WorkflowTemplate {
+	return []WorkflowTemplate{{ID: "single-agent", Name: "Single Agent", Version: 1, MinAgents: 1, MaxAgents: 1}}
+}
+func (f *fakeWorkflowCoordinator) StartWorkflowTemplate(_ context.Context, tenant, templateID string, input WorkflowTemplateRunInput) (WorkflowResult, error) {
+	return f.StartWorkflow(context.Background(), tenant, WorkflowDefinition{ID: input.ID, Name: templateID, Steps: []WorkflowStepInput{{ID: "template-step", AgentID: input.Agents[0].AgentID, Skill: input.Agents[0].Skill, Text: input.Text}}})
+}
 func (f *fakeWorkflowCoordinator) ReconcileWorkflow(context.Context, string, string, bool) (WorkflowResult, error) {
 	return WorkflowResult{Workflow: f.workflow}, nil
 }
-func (f *fakeWorkflowCoordinator) ContinueWorkflow(context.Context, string, string, string) (WorkflowResult, error) {
+func (f *fakeWorkflowCoordinator) ContinueWorkflow(context.Context, string, string, WorkflowContinueInput) (WorkflowResult, error) {
 	return WorkflowResult{Workflow: f.workflow}, nil
 }
 func (f *fakeWorkflowCoordinator) CompensateWorkflow(context.Context, string, string) (WorkflowResult, error) {
@@ -462,6 +468,22 @@ func TestHTTPWorkflowManagementIsTenantScoped(t *testing.T) {
 	response = request(t, handler, http.MethodPost, "/v1/workers/drain", "", "tenant-a", nil)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mode":"DRAINING"`) {
 		t.Fatalf("worker drain status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHTTPWorkflowTemplateManagementUsesWorkflowScopes(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	service := newTestService(t, store, &fakeAdapter{})
+	coordinator := &fakeWorkflowCoordinator{}
+	handler := (&HTTPHandler{Service: service, Workflows: coordinator, WorkerGate: worker.NewGate(), Authenticator: DevelopmentAuthenticator{}, Authorizer: access.DefaultScopeAuthorizer()}).Handler()
+	response := request(t, handler, http.MethodGet, "/v1/workflow-templates", "", "tenant-a", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"single-agent"`) {
+		t.Fatalf("template list status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodPost, "/v1/workflow-templates/single-agent/runs", `{"id":"wf-template","text":"work","agents":[{"agentId":"agent-1"}]}`, "tenant-a", nil)
+	if response.Code != http.StatusAccepted || coordinator.workflow.Name != "single-agent" {
+		t.Fatalf("template start status=%d workflow=%+v body=%s", response.Code, coordinator.workflow, response.Body.String())
 	}
 }
 

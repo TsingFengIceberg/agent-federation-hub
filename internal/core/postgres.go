@@ -23,6 +23,25 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+// SQLExecutor is the minimal SQL boundary shared with durable auxiliary
+// stores such as the encrypted Workflow input vault. It intentionally exposes
+// no pool configuration or migration ownership; PostgresStore remains the
+// owner of connection lifecycle and embedded schema migrations.
+type SQLExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// SQLExecutor returns the already-migrated PostgreSQL connection pool for
+// repository-owned auxiliary tables. The returned value is invalid after
+// Close and must not be retained by callers beyond the Store lifecycle.
+func (s *PostgresStore) SQLExecutor() SQLExecutor {
+	if s == nil {
+		return nil
+	}
+	return s.pool
+}
+
 func (s *PostgresStore) GetWorkerControl(ctx context.Context, scope string) (WorkerControl, error) {
 	if s == nil || s.pool == nil || strings.TrimSpace(scope) == "" {
 		return WorkerControl{}, errors.New("worker control scope is required")

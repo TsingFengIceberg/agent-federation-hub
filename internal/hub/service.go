@@ -16,6 +16,7 @@ import (
 	artifactstore "github.com/TsingFengIceberg/agent-federation-hub/internal/artifact"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	a2afederation "github.com/TsingFengIceberg/agent-federation-hub/internal/federation/a2a"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/observability"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 )
@@ -47,6 +48,11 @@ type RegisterAgentInput struct {
 // Agent Card must satisfy before the Agent is persisted. The remote Agent
 // Card remains authoritative for its endpoint and declared capabilities.
 type AgentRegistrationPolicy struct {
+	// RequiredProfiles is an ordered set of acceptable A2A interfaces. A
+	// provider may advertise any one of these profiles; the first matching
+	// profile is selected by the adapter. The legacy singular fields remain
+	// supported for callers that predate profile negotiation.
+	RequiredProfiles         []a2afederation.BindingProfile
 	RequiredProtocolVersion  string
 	RequiredProtocolBinding  string
 	RequiredStreamTransport  string
@@ -61,7 +67,8 @@ type AgentRegistrationPolicy struct {
 type SubmitTaskInput struct {
 	AgentID        string         `json:"agentId,omitempty"`
 	Skill          string         `json:"skill,omitempty"`
-	Text           string         `json:"text"`
+	Text           string         `json:"text,omitempty"`
+	Parts          []core.Part    `json:"parts,omitempty"`
 	EnablePush     bool           `json:"enablePush,omitempty"`
 	Priority       int            `json:"priority,omitempty"`
 	Extensions     []string       `json:"extensions,omitempty"`
@@ -151,7 +158,8 @@ func (s *Service) RefreshAgent(ctx context.Context, tenantID, agentID string) (c
 }
 
 type ContinueTaskInput struct {
-	Text string `json:"text"`
+	Text  string      `json:"text,omitempty"`
+	Parts []core.Part `json:"parts,omitempty"`
 }
 
 type RevokeTokenInput struct {
@@ -175,11 +183,14 @@ func (s *Service) ValidateAgentRegistration(ctx context.Context, tenantID string
 	if err := validateHTTPURL(input.CardURL, !s.AllowPrivateAgentURLs); err != nil {
 		return federation.Descriptor{}, fmt.Errorf("card URL: %w", err)
 	}
-	descriptor, err := s.Adapter.Discover(ctx, input.CardURL)
+	descriptor, err := discoverWithRegistrationProfiles(ctx, s.Adapter, input.CardURL, policy.RequiredProfiles)
 	if err != nil {
 		return federation.Descriptor{}, err
 	}
-	if policy.RequiredProtocolVersion != "" && descriptor.ProtocolVersion != policy.RequiredProtocolVersion {
+	if len(policy.RequiredProfiles) > 0 && !descriptorMatchesAnyProfile(descriptor, policy.RequiredProfiles) {
+		return federation.Descriptor{}, fmt.Errorf("remote Agent does not advertise any configured A2A profile")
+	}
+	if policy.RequiredProtocolVersion != "" && !a2afederation.ProtocolVersionsCompatible(descriptor.ProtocolVersion, policy.RequiredProtocolVersion) {
 		return federation.Descriptor{}, fmt.Errorf("remote Agent protocol version %q does not match required %q", descriptor.ProtocolVersion, policy.RequiredProtocolVersion)
 	}
 	if policy.RequiredProtocolBinding != "" && descriptor.ProtocolBinding != policy.RequiredProtocolBinding {
@@ -231,6 +242,39 @@ func (s *Service) ValidateAgentRegistration(ctx context.Context, tenantID string
 		}
 	}
 	return descriptor, nil
+}
+
+type profileAwareDiscovery interface {
+	DiscoverWithProfiles(context.Context, string, []a2afederation.BindingProfile) (federation.Descriptor, error)
+}
+
+func discoverWithRegistrationProfiles(ctx context.Context, adapter federation.Adapter, cardURL string, profiles []a2afederation.BindingProfile) (federation.Descriptor, error) {
+	if len(profiles) > 0 {
+		if aware, ok := adapter.(profileAwareDiscovery); ok {
+			return aware.DiscoverWithProfiles(ctx, cardURL, profiles)
+		}
+	}
+	return adapter.Discover(ctx, cardURL)
+}
+
+func descriptorMatchesAnyProfile(descriptor federation.Descriptor, profiles []a2afederation.BindingProfile) bool {
+	for _, profile := range profiles {
+		if err := profile.Validate(); err != nil {
+			continue
+		}
+		if !a2afederation.ProtocolVersionsCompatible(descriptor.ProtocolVersion, profile.ProtocolVersion) {
+			continue
+		}
+		if normalizeBindingName(descriptor.ProtocolBinding) != normalizeBindingName(string(profile.Binding)) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func normalizeBindingName(value string) string {
+	return strings.ToUpper(strings.NewReplacer("_", "", "-", "", "+", "").Replace(strings.TrimSpace(value)))
 }
 
 func (s *Service) RegisterAgentWithPolicy(ctx context.Context, tenantID string, input RegisterAgentInput, policy AgentRegistrationPolicy) (core.Agent, error) {
@@ -400,8 +444,9 @@ func (s *Service) RevokeToken(ctx context.Context, tenantID string, input Revoke
 }
 
 func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitTaskInput) (core.Task, error) {
-	if strings.TrimSpace(input.Text) == "" {
-		return core.Task{}, errors.New("task text is required")
+	parts, err := NormalizeMessageParts(input.Text, input.Parts)
+	if err != nil {
+		return core.Task{}, err
 	}
 	if input.Priority < -1000 || input.Priority > 1000 {
 		return core.Task{}, errors.New("task priority must be between -1000 and 1000")
@@ -418,6 +463,10 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 	if err != nil {
 		return core.Task{}, err
 	}
+	materializedParts, err := MaterializeMessageParts(ctx, tenantID, s.Artifacts, parts)
+	if err != nil {
+		return core.Task{}, err
+	}
 	idempotencyKey := strings.TrimSpace(input.IdempotencyKey)
 	if len(idempotencyKey) > 256 {
 		return core.Task{}, errors.New("task idempotency key exceeds 256 characters")
@@ -431,10 +480,10 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 	task := core.Task{
 		ID: taskID, TenantID: tenantID, AgentID: agent.ID,
 		MessageID: messageID, IdempotencyKey: idempotencyKey, InputDigest: core.DigestJSON(struct {
-			Text       string         `json:"text"`
+			Parts      []core.Part    `json:"parts"`
 			Extensions []string       `json:"extensions,omitempty"`
 			Metadata   map[string]any `json:"metadata,omitempty"`
-		}{input.Text, extensions, metadata}),
+		}{parts, extensions, metadata}),
 		RequestedExtensions: extensions, ExtensionMetadata: metadata,
 		Priority: input.Priority,
 		State:    core.TaskStateSubmitted, Delivery: core.DeliveryPending,
@@ -489,7 +538,7 @@ func (s *Service) SubmitTask(ctx context.Context, tenantID string, input SubmitT
 		return task, err
 	}
 
-	message := federation.Message{ID: task.MessageID, Text: input.Text, Push: push, ReturnImmediately: true,
+	message := federation.Message{ID: task.MessageID, Text: firstTextPart(parts), Parts: materializedParts, Push: push, ReturnImmediately: true,
 		Extensions: append([]string(nil), task.RequestedExtensions...), Metadata: cloneAnyMap(task.ExtensionMetadata)}
 	callContext := ctx
 	var span observability.Span
@@ -560,10 +609,14 @@ func (s *Service) GetTask(ctx context.Context, tenantID, taskID string) (core.Ta
 
 // ContinueTask sends a follow-up A2A Message on an existing provider-owned
 // Task. The remote Task and Context IDs are retained by the Hub; callers only
-// provide the new text and the Hub continues to reconcile the same Task.
+// provide the new text and the Hub continues to reconcile the same Task. Both
+// INPUT_REQUIRED (human/data input) and AUTH_REQUIRED (fresh authorization or
+// credential approval) are resumable states. Credential material itself is
+// never accepted in this payload or persisted by the Hub.
 func (s *Service) ContinueTask(ctx context.Context, tenantID, taskID string, input ContinueTaskInput) (core.Task, error) {
-	if strings.TrimSpace(input.Text) == "" {
-		return core.Task{}, errors.New("continuation text is required")
+	parts, err := NormalizeMessageParts(input.Text, input.Parts)
+	if err != nil {
+		return core.Task{}, fmt.Errorf("continuation: %w", err)
 	}
 	task, err := s.Store.GetTask(ctx, tenantID, taskID)
 	if err != nil {
@@ -572,16 +625,21 @@ func (s *Service) ContinueTask(ctx context.Context, tenantID, taskID string, inp
 	if task.RemoteTaskID == "" || task.RemoteContextID == "" {
 		return task, errors.New("task has no remote Task and Context IDs")
 	}
-	if task.State != core.TaskStateInputRequired {
-		return task, fmt.Errorf("task continuation requires INPUT_REQUIRED state, got %s", task.State)
+	if task.State != core.TaskStateInputRequired && task.State != core.TaskStateAuthRequired {
+		return task, fmt.Errorf("task continuation requires INPUT_REQUIRED or AUTH_REQUIRED state, got %s", task.State)
 	}
 	agent, err := s.Store.GetAgent(ctx, tenantID, task.AgentID)
 	if err != nil {
 		return task, err
 	}
+	materializedParts, err := MaterializeMessageParts(ctx, tenantID, s.Artifacts, parts)
+	if err != nil {
+		return task, err
+	}
 	message := federation.Message{
 		ID:                core.NewID(),
-		Text:              input.Text,
+		Text:              firstTextPart(parts),
+		Parts:             materializedParts,
 		RemoteTaskID:      task.RemoteTaskID,
 		RemoteContextID:   task.RemoteContextID,
 		ReturnImmediately: true,

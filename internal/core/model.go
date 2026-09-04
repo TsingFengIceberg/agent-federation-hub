@@ -52,21 +52,32 @@ func (s WorkflowState) Terminal() bool {
 }
 
 type WorkflowStep struct {
-	ID                  string    `json:"id"`
-	AgentID             string    `json:"agentId"`
-	Skill               string    `json:"skill,omitempty"`
-	DependsOn           []string  `json:"dependsOn,omitempty"`
-	InputRef            string    `json:"inputRef,omitempty"`
-	InputDigest         string    `json:"inputDigest,omitempty"`
-	TaskID              string    `json:"taskId,omitempty"`
-	State               TaskState `json:"state"`
-	Required            bool      `json:"required"`
-	Attempt             uint32    `json:"attempt,omitempty"`
-	CompensationText    string    `json:"compensationText,omitempty"`
-	CompensationTaskID  string    `json:"compensationTaskId,omitempty"`
-	CompensationState   TaskState `json:"compensationState,omitempty"`
-	Problem             *Problem  `json:"problem,omitempty"`
-	CompensationProblem *Problem  `json:"compensationProblem,omitempty"`
+	ID                  string                  `json:"id"`
+	AgentID             string                  `json:"agentId"`
+	Skill               string                  `json:"skill,omitempty"`
+	DependsOn           []string                `json:"dependsOn,omitempty"`
+	ArtifactInputs      []WorkflowArtifactInput `json:"artifactInputs,omitempty"`
+	InputRef            string                  `json:"inputRef,omitempty"`
+	InputDigest         string                  `json:"inputDigest,omitempty"`
+	TaskID              string                  `json:"taskId,omitempty"`
+	State               TaskState               `json:"state"`
+	Required            bool                    `json:"required"`
+	Attempt             uint32                  `json:"attempt,omitempty"`
+	CompensationText    string                  `json:"compensationText,omitempty"`
+	CompensationTaskID  string                  `json:"compensationTaskId,omitempty"`
+	CompensationState   TaskState               `json:"compensationState,omitempty"`
+	Problem             *Problem                `json:"problem,omitempty"`
+	CompensationProblem *Problem                `json:"compensationProblem,omitempty"`
+}
+
+// WorkflowArtifactInput declares an explicit, observable Artifact dataflow
+// edge. A Workflow can project only Artifact Parts that the Hub already
+// observed for a named upstream child Task; it never opens provider-private
+// state or assumes an Artifact that was not delivered through A2A.
+type WorkflowArtifactInput struct {
+	FromStepID string `json:"fromStepId"`
+	ArtifactID string `json:"artifactId,omitempty"`
+	PartIndex  *int   `json:"partIndex,omitempty"`
 }
 
 type Workflow struct {

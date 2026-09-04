@@ -15,7 +15,9 @@ import (
 	"sort"
 	"strings"
 
+	a2afederation "github.com/TsingFengIceberg/agent-federation-hub/internal/federation/a2a"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/hub"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -151,6 +153,9 @@ func (p ProtocolPolicy) Validate(field string, required bool) error {
 	for i, profile := range profiles {
 		if strings.TrimSpace(profile.ProtocolVersion) == "" {
 			return fmt.Errorf("%s.profiles[%d].protocol_version is required", field, i)
+		}
+		if _, err := a2afederation.CanonicalProtocolVersion(profile.ProtocolVersion); err != nil {
+			return fmt.Errorf("%s.profiles[%d].protocol_version is invalid: %w", field, i, err)
 		}
 		binding := strings.ToUpper(strings.TrimSpace(profile.Binding))
 		if binding != "JSONRPC" && binding != "HTTP_JSON" && binding != "GRPC" {
@@ -364,6 +369,19 @@ func (r Registration) RegistrationPolicy(defaults Defaults) hub.AgentRegistratio
 	profiles := r.Profiles(defaults)
 	policy := hub.AgentRegistrationPolicy{}
 	if len(profiles) > 0 {
+		policy.RequiredProfiles = make([]a2afederation.BindingProfile, 0, len(profiles))
+		for _, configured := range profiles {
+			binding := strings.ToUpper(strings.TrimSpace(configured.Binding))
+			if binding == "HTTP_JSON" {
+				binding = "HTTP+JSON"
+			}
+			profile := a2afederation.BindingProfile{
+				ProtocolVersion: configured.ProtocolVersion,
+				Binding:         a2aTransport(binding),
+				StreamTransport: configured.StreamTransport,
+			}
+			policy.RequiredProfiles = append(policy.RequiredProfiles, profile)
+		}
 		policy.RequiredProtocolVersion = profiles[0].ProtocolVersion
 		policy.RequiredProtocolBinding = strings.ToUpper(profiles[0].Binding)
 		policy.RequiredStreamTransport = strings.ToUpper(profiles[0].StreamTransport)
@@ -376,6 +394,19 @@ func (r Registration) RegistrationPolicy(defaults Defaults) hub.AgentRegistratio
 	policy.RequiredExtensions = append([]string(nil), discovery.RequiredExtensions...)
 	policy.AllowedExtensions = append([]string(nil), discovery.AllowedExtensions...)
 	return policy
+}
+
+func a2aTransport(value string) a2a.TransportProtocol {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "JSONRPC", "JSON_RPC":
+		return a2a.TransportProtocolJSONRPC
+	case "HTTP+JSON", "HTTP_JSON", "HTTPJSON":
+		return a2a.TransportProtocolHTTPJSON
+	case "GRPC":
+		return a2a.TransportProtocolGRPC
+	default:
+		return a2a.TransportProtocol(value)
+	}
 }
 
 func (r Registration) AllowsPrivateURLs(defaults Defaults) bool {

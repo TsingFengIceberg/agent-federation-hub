@@ -39,7 +39,7 @@ func TestPostgresTransactionalStoreAndMultiInstanceLeases(t *testing.T) {
 	if _, err := first.pool.Exec(ctx, `
 		TRUNCATE afh_artifacts, afh_artifact_usage, afh_token_revocations,
 			afh_workflow_events, afh_workflows, afh_events, afh_outbox, afh_inbox,
-			afh_tasks, afh_agents CASCADE`); err != nil {
+			afh_workflow_inputs, afh_tasks, afh_agents CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 

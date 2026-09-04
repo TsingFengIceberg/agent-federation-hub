@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -50,17 +51,24 @@ func NewFileInputStore(root string, keys artifactstore.KeyProvider) (*FileInputS
 	return &FileInputStore{Root: filepath.Clean(root), Keys: keys, MaxBytes: 1 << 20, FileMode: 0o600}, nil
 }
 
-func (s *FileInputStore) Put(ctx context.Context, tenantID, workflowID, stepID, text string) (string, error) {
-	if s == nil || s.Keys == nil || s.Root == "" || tenantID == "" || workflowID == "" || stepID == "" || text == "" {
+func (s *FileInputStore) Put(ctx context.Context, tenantID, workflowID, stepID string, input WorkflowInput) (string, error) {
+	if s == nil || s.Keys == nil || s.Root == "" || tenantID == "" || workflowID == "" || stepID == "" {
 		return "", errors.New("workflow input vault requires tenant, workflow, step, and input")
 	}
-	if len(text) > s.maxBytes() {
+	if err := input.validate(); err != nil {
+		return "", err
+	}
+	plaintext, err := json.Marshal(input)
+	if err != nil {
+		return "", fmt.Errorf("encode workflow input: %w", err)
+	}
+	if len(plaintext) > s.maxBytes() {
 		return "", errors.New("workflow provider input exceeds configured limit")
 	}
 	ref := fmt.Sprintf("%s/%s/%s", tenantID, workflowID, stepID)
 	path := s.pathFor(ref)
 	if existing, err := s.Get(ctx, tenantID, ref); err == nil {
-		if existing != text {
+		if !workflowInputsEqual(existing, input) {
 			return "", fmt.Errorf("workflow input reference %q already contains different input", ref)
 		}
 		return ref, nil
@@ -82,7 +90,7 @@ func (s *FileInputStore) Put(ctx context.Context, tenantID, workflowID, stepID, 
 	if len(keyID) > 65535 {
 		return "", errors.New("workflow input key ID is too long")
 	}
-	ciphertext := aead.Seal(nil, nonce, []byte(text), []byte(tenantID+"\x00"+ref))
+	ciphertext := aead.Seal(nil, nonce, plaintext, []byte(tenantID+"\x00"+ref))
 	envelope := make([]byte, 8+len(keyID)+len(nonce)+len(ciphertext))
 	copy(envelope[:4], inputEnvelopeMagic[:])
 	binary.BigEndian.PutUint16(envelope[4:6], uint16(len(keyID)))
@@ -97,7 +105,7 @@ func (s *FileInputStore) Put(ctx context.Context, tenantID, workflowID, stepID, 
 			if getErr != nil {
 				return "", getErr
 			}
-			if existing != text {
+			if !workflowInputsEqual(existing, input) {
 				return "", fmt.Errorf("workflow input reference %q already contains different input", ref)
 			}
 			return ref, nil
@@ -107,50 +115,59 @@ func (s *FileInputStore) Put(ctx context.Context, tenantID, workflowID, stepID, 
 	return ref, nil
 }
 
-func (s *FileInputStore) Get(ctx context.Context, tenantID, ref string) (string, error) {
+func (s *FileInputStore) Get(ctx context.Context, tenantID, ref string) (WorkflowInput, error) {
 	if s == nil || s.Keys == nil || s.Root == "" || tenantID == "" || ref == "" {
-		return "", errors.New("workflow input lookup requires tenant and reference")
+		return WorkflowInput{}, errors.New("workflow input lookup requires tenant and reference")
 	}
 	if !strings.HasPrefix(ref, tenantID+"/") || strings.Contains(ref, "..") || strings.ContainsAny(ref, "\\\n\r") {
-		return "", core.ErrNotFound
+		return WorkflowInput{}, core.ErrNotFound
 	}
 	envelope, err := os.ReadFile(s.pathFor(ref))
 	if errors.Is(err, os.ErrNotExist) {
-		return "", core.ErrNotFound
+		return WorkflowInput{}, core.ErrNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("read workflow input: %w", err)
+		return WorkflowInput{}, fmt.Errorf("read workflow input: %w", err)
 	}
 	if len(envelope) < 8 || !bytes.Equal(envelope[:4], inputEnvelopeMagic[:]) {
-		return "", errors.New("workflow input envelope is invalid")
+		return WorkflowInput{}, errors.New("workflow input envelope is invalid")
 	}
 	keyLength := int(binary.BigEndian.Uint16(envelope[4:6]))
 	nonceLength := int(envelope[6])
 	if keyLength == 0 || nonceLength == 0 || 8+keyLength+nonceLength >= len(envelope) {
-		return "", errors.New("workflow input envelope is truncated")
+		return WorkflowInput{}, errors.New("workflow input envelope is truncated")
 	}
 	keyID := string(envelope[8 : 8+keyLength])
 	nonceStart := 8 + keyLength
 	nonce := envelope[nonceStart : nonceStart+nonceLength]
 	rawKey, err := s.Keys.ByID(artifactstore.WithTenantKeyContext(ctx, tenantID), keyID)
 	if err != nil {
-		return "", err
+		return WorkflowInput{}, err
 	}
 	aead, err := newInputAEAD(rawKey)
 	if err != nil {
-		return "", err
+		return WorkflowInput{}, err
 	}
 	if len(nonce) != aead.NonceSize() {
-		return "", errors.New("workflow input nonce has an invalid size")
+		return WorkflowInput{}, errors.New("workflow input nonce has an invalid size")
 	}
 	plaintext, err := aead.Open(nil, nonce, envelope[nonceStart+nonceLength:], []byte(tenantID+"\x00"+ref))
 	if err != nil {
-		return "", errors.New("workflow input authentication failed")
+		return WorkflowInput{}, errors.New("workflow input authentication failed")
 	}
 	if len(plaintext) == 0 || len(plaintext) > s.maxBytes() {
-		return "", errors.New("workflow input exceeds configured limit")
+		return WorkflowInput{}, errors.New("workflow input exceeds configured limit")
 	}
-	return string(plaintext), nil
+	var input WorkflowInput
+	if err := json.Unmarshal(plaintext, &input); err != nil {
+		// Pre-Part vault envelopes stored a bare text string. Preserve restart
+		// recovery for those durable records without rewriting them in place.
+		input = WorkflowInput{Text: string(plaintext)}
+	}
+	if err := input.validate(); err != nil {
+		return WorkflowInput{}, err
+	}
+	return cloneWorkflowInput(input), nil
 }
 
 func (s *FileInputStore) maxBytes() int {

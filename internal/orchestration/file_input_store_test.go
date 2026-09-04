@@ -21,7 +21,7 @@ func TestFileInputStorePersistsEncryptedTenantBoundInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := store.Put(context.Background(), "tenant-a", "wf-1", "step-1", "private prompt")
+	ref, err := store.Put(context.Background(), "tenant-a", "wf-1", "step-1", WorkflowInput{Text: "private prompt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +58,8 @@ func TestFileInputStorePersistsEncryptedTenantBoundInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value != "private prompt" {
-		t.Fatalf("got %q", value)
+	if value.Text != "private prompt" {
+		t.Fatalf("got %+v", value)
 	}
 	_, err = restarted.Get(context.Background(), "tenant-b", ref)
 	if err == nil {
@@ -74,7 +74,7 @@ func TestFileInputStoreDetectsTamperingAndSupportsKeyRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := store.Put(context.Background(), "tenant", "workflow", "step", "value")
+	ref, err := store.Put(context.Background(), "tenant", "workflow", "step", WorkflowInput{Text: "value"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestFileInputStoreDetectsTamperingAndSupportsKeyRotation(t *testing.T) {
 	// Write a second valid envelope and verify a rotated provider can still read
 	// an envelope created with the retired key. A tampered reference is never
 	// silently overwritten.
-	ref, err = store.Put(context.Background(), "tenant", "workflow", "step-2", "value")
+	ref, err = store.Put(context.Background(), "tenant", "workflow", "step-2", WorkflowInput{Text: "value"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,15 +111,15 @@ func TestFileInputStoreDetectsTamperingAndSupportsKeyRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value != "value" {
-		t.Fatalf("got %q", value)
+	if value.Text != "value" {
+		t.Fatalf("got %+v", value)
 	}
-	newRef, err := rotatedStore.Put(context.Background(), "tenant", "workflow", "step-3", "new value")
+	newRef, err := rotatedStore.Put(context.Background(), "tenant", "workflow", "step-3", WorkflowInput{Text: "new value"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := mustGetInput(t, rotatedStore, "tenant", newRef); got != "new value" {
-		t.Fatalf("got %q", got)
+	if got := mustGetInput(t, rotatedStore, "tenant", newRef); got.Text != "new value" {
+		t.Fatalf("got %+v", got)
 	}
 }
 
@@ -137,7 +137,7 @@ func TestFileInputStoreConcurrentConflictingPutDoesNotOverwrite(t *testing.T) {
 		wait.Add(1)
 		go func(value string) {
 			defer wait.Done()
-			_, putErr := store.Put(context.Background(), "tenant", "workflow", "step", value)
+			_, putErr := store.Put(context.Background(), "tenant", "workflow", "step", WorkflowInput{Text: value})
 			errs <- putErr
 		}(value)
 	}
@@ -160,12 +160,12 @@ func TestFileInputStoreConcurrentConflictingPutDoesNotOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value != "first" && value != "second" {
-		t.Fatalf("unexpected installed value %q", value)
+	if value.Text != "first" && value.Text != "second" {
+		t.Fatalf("unexpected installed value %+v", value)
 	}
 }
 
-func mustGetInput(t *testing.T, store *FileInputStore, tenant, ref string) string {
+func mustGetInput(t *testing.T, store *FileInputStore, tenant, ref string) WorkflowInput {
 	t.Helper()
 	value, err := store.Get(context.Background(), tenant, ref)
 	if err != nil {

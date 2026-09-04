@@ -37,6 +37,75 @@ func normalizeDependencies(stepID string, values []string) ([]string, error) {
 	return result, nil
 }
 
+func normalizeArtifactInputs(stepID string, dependencies []string, values []core.WorkflowArtifactInput) ([]core.WorkflowArtifactInput, error) {
+	allowed := make(map[string]struct{}, len(dependencies))
+	for _, dependency := range dependencies {
+		allowed[dependency] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]core.WorkflowArtifactInput, 0, len(values))
+	for _, value := range values {
+		value.FromStepID = strings.TrimSpace(value.FromStepID)
+		value.ArtifactID = strings.TrimSpace(value.ArtifactID)
+		if value.FromStepID == "" {
+			return nil, fmt.Errorf("workflow step %q Artifact input requires fromStepId", stepID)
+		}
+		if _, ok := allowed[value.FromStepID]; !ok {
+			return nil, fmt.Errorf("workflow step %q Artifact input %q must name a direct dependency", stepID, value.FromStepID)
+		}
+		if value.PartIndex != nil && *value.PartIndex < 0 {
+			return nil, fmt.Errorf("workflow step %q Artifact input partIndex must not be negative", stepID)
+		}
+		key := value.FromStepID + "\x00" + value.ArtifactID + "\x00"
+		if value.PartIndex != nil {
+			key += fmt.Sprintf("%d", *value.PartIndex)
+		}
+		if _, ok := seen[key]; ok {
+			return nil, fmt.Errorf("workflow step %q repeats an Artifact input", stepID)
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+// projectArtifactInputs selects only A2A-visible Artifact Parts produced by a
+// direct dependency. The Hub neither accesses a provider's private runtime
+// state nor synthesizes a result when the provider did not publish one.
+func (c *Coordinator) projectArtifactInputs(ctx context.Context, tenantID string, workflow core.Workflow, step core.WorkflowStep) ([]core.Part, error) {
+	parts := make([]core.Part, 0)
+	for _, input := range step.ArtifactInputs {
+		source := findWorkflowStep(workflow.Steps, input.FromStepID)
+		if source == nil || source.TaskID == "" || source.State != core.TaskStateCompleted {
+			return nil, fmt.Errorf("Artifact input source step %q has not completed", input.FromStepID)
+		}
+		task, err := c.Service.GetTask(ctx, tenantID, source.TaskID)
+		if err != nil {
+			return nil, fmt.Errorf("read Artifact input source step %q: %w", input.FromStepID, err)
+		}
+		matched := false
+		for _, artifact := range task.Artifacts {
+			if input.ArtifactID != "" && artifact.ID != input.ArtifactID {
+				continue
+			}
+			if input.PartIndex != nil {
+				if *input.PartIndex >= len(artifact.Parts) {
+					continue
+				}
+				parts = append(parts, artifact.Parts[*input.PartIndex])
+				matched = true
+				continue
+			}
+			parts = append(parts, artifact.Parts...)
+			matched = len(artifact.Parts) > 0 || matched
+		}
+		if !matched {
+			return nil, fmt.Errorf("Artifact input from step %q did not match an observed Artifact", input.FromStepID)
+		}
+	}
+	return parts, nil
+}
+
 func validateWorkflowGraph(steps []core.WorkflowStep) error {
 	known := make(map[string]struct{}, len(steps))
 	for _, step := range steps {
@@ -148,12 +217,18 @@ func (c *Coordinator) submitWorkflowReady(ctx context.Context, tenantID, workflo
 			index := index
 			step := workflow.Steps[index]
 			go func() {
-				text, inputErr := c.inputStore().Get(ctx, tenantID, step.InputRef)
+				input, inputErr := c.inputStore().Get(ctx, tenantID, step.InputRef)
 				if inputErr != nil {
 					results <- branchResult{index: index, err: inputErr}
 					return
 				}
-				task, submitErr := c.Service.SubmitTask(ctx, tenantID, hub.SubmitTaskInput{AgentID: step.AgentID, Skill: step.Skill, Text: text})
+				artifactParts, artifactErr := c.projectArtifactInputs(ctx, tenantID, workflow, step)
+				if artifactErr != nil {
+					results <- branchResult{index: index, err: artifactErr}
+					return
+				}
+				input.Parts = append(input.Parts, artifactParts...)
+				task, submitErr := c.Service.SubmitTask(ctx, tenantID, hub.SubmitTaskInput{AgentID: step.AgentID, Skill: step.Skill, Text: input.Text, Parts: input.Parts})
 				results <- branchResult{index: index, task: task, err: submitErr}
 			}()
 		}
@@ -232,17 +307,22 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, tenantID string, defini
 		if definitionStep.AgentID == "" && definitionStep.Skill == "" {
 			return WorkflowResult{}, fmt.Errorf("workflow step %q requires agentId or skill", stepID)
 		}
-		if definitionStep.Text == "" {
-			return WorkflowResult{}, fmt.Errorf("workflow step %q text is required", stepID)
+		if _, inputErr := hub.NormalizeMessageParts(definitionStep.Text, definitionStep.Parts); inputErr != nil {
+			return WorkflowResult{}, fmt.Errorf("workflow step %q input: %w", stepID, inputErr)
 		}
 		dependencies, dependencyErr := normalizeDependencies(stepID, definitionStep.DependsOn)
 		if dependencyErr != nil {
 			return WorkflowResult{}, dependencyErr
 		}
+		artifactInputs, artifactInputErr := normalizeArtifactInputs(stepID, dependencies, definitionStep.ArtifactInputs)
+		if artifactInputErr != nil {
+			return WorkflowResult{}, artifactInputErr
+		}
 		steps = append(steps, core.WorkflowStep{
 			ID: stepID, AgentID: definitionStep.AgentID, Skill: definitionStep.Skill,
-			DependsOn: dependencies,
-			State:     core.TaskStateUnknown, Required: definitionStep.Required,
+			DependsOn:      dependencies,
+			ArtifactInputs: artifactInputs,
+			State:          core.TaskStateUnknown, Required: definitionStep.Required,
 			CompensationText: definitionStep.CompensationText,
 		})
 	}
@@ -276,13 +356,14 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, tenantID string, defini
 
 	inputStore := c.inputStore()
 	for index, definitionStep := range definition.Steps {
-		ref, inputErr := inputStore.Put(ctx, tenantID, workflow.ID, steps[index].ID, definitionStep.Text)
+		input := WorkflowInput{Text: definitionStep.Text, Parts: definitionStep.Parts}
+		ref, inputErr := inputStore.Put(ctx, tenantID, workflow.ID, steps[index].ID, input)
 		if inputErr != nil {
 			return WorkflowResult{Workflow: workflow}, inputErr
 		}
 		_, _, inputRefErr := store.ApplyWorkflowVersion(ctx, tenantID, workflow.ID, 0, "input:"+steps[index].ID, func(current *core.Workflow) (core.WorkflowEvent, error) {
 			current.Steps[index].InputRef = ref
-			current.Steps[index].InputDigest = core.DigestString(definitionStep.Text)
+			current.Steps[index].InputDigest = core.DigestJSON(input)
 			current.UpdatedAt = time.Now().UTC()
 			return core.WorkflowEvent{Type: "workflow.input.stored", Source: "hub", StepID: steps[index].ID, CreatedAt: current.UpdatedAt}, nil
 		})
@@ -440,7 +521,7 @@ func (c *Coordinator) CancelWorkflow(ctx context.Context, tenantID, workflowID s
 }
 
 // ContinueWorkflow resumes all waiting branches with the same user input.
-func (c *Coordinator) ContinueWorkflow(ctx context.Context, tenantID, workflowID, text string) (WorkflowResult, error) {
+func (c *Coordinator) ContinueWorkflow(ctx context.Context, tenantID, workflowID string, input hub.WorkflowContinueInput) (WorkflowResult, error) {
 	store, err := c.workflowStore()
 	if err != nil {
 		return WorkflowResult{}, err
@@ -454,10 +535,10 @@ func (c *Coordinator) ContinueWorkflow(ctx context.Context, tenantID, workflowID
 	}
 	var failures []string
 	for index, step := range workflow.Steps {
-		if step.State != core.TaskStateInputRequired || step.TaskID == "" {
+		if !waitingTaskState(step.State) || step.TaskID == "" {
 			continue
 		}
-		task, continueErr := c.Service.ContinueTask(ctx, tenantID, step.TaskID, hub.ContinueTaskInput{Text: text})
+		task, continueErr := c.Service.ContinueTask(ctx, tenantID, step.TaskID, hub.ContinueTaskInput{Text: input.Text, Parts: input.Parts})
 		if continueErr != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", step.ID, continueErr))
 			continue
@@ -641,7 +722,7 @@ func workflowStateForSteps(steps []core.WorkflowStep) core.WorkflowState {
 		if step.State != core.TaskStateCompleted {
 			allCompleted = false
 		}
-		if step.State == core.TaskStateInputRequired {
+		if waitingTaskState(step.State) {
 			anyInput = true
 		}
 		if step.State == core.TaskStateFailed || step.State == core.TaskStateRejected || step.State == core.TaskStateCanceled {
@@ -663,4 +744,8 @@ func workflowStateForSteps(steps []core.WorkflowStep) core.WorkflowState {
 		return core.WorkflowStateFailed
 	}
 	return core.WorkflowStateRunning
+}
+
+func waitingTaskState(state core.TaskState) bool {
+	return state == core.TaskStateInputRequired || state == core.TaskStateAuthRequired
 }

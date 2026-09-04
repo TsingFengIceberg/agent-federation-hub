@@ -93,6 +93,8 @@ func (h *HTTPHandler) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tasks/{taskID}/reconcile", h.protected(access.ActionTaskReconcile, h.reconcileTask))
 	mux.HandleFunc("POST /v1/workflows", h.protected(access.ActionWorkflowCreate, h.createWorkflow))
 	mux.HandleFunc("GET /v1/workflows", h.protected(access.ActionWorkflowList, h.listWorkflows))
+	mux.HandleFunc("GET /v1/workflow-templates", h.protected(access.ActionWorkflowList, h.listWorkflowTemplates))
+	mux.HandleFunc("POST /v1/workflow-templates/{templateID}/runs", h.protected(access.ActionWorkflowCreate, h.startWorkflowTemplate))
 	mux.HandleFunc("GET /v1/workflows/{workflowID}", h.protected(access.ActionWorkflowRead, h.getWorkflow))
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/reconcile", h.protected(access.ActionWorkflowControl, h.reconcileWorkflow))
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/continue", h.protected(access.ActionWorkflowControl, h.continueWorkflow))
@@ -524,10 +526,6 @@ func (h *HTTPHandler) reconcileTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, task)
 }
 
-type workflowContinueInput struct {
-	Text string `json:"text"`
-}
-
 func (h *HTTPHandler) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := requireTenant(w, r)
 	if !ok {
@@ -542,6 +540,42 @@ func (h *HTTPHandler) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := h.Workflows.StartWorkflow(r.Context(), tenantID, definition)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if h.Observability != nil {
+		h.Observability.IncWorkflowStarted()
+		h.Observability.IncWorkflowState(string(result.Workflow.State))
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (h *HTTPHandler) listWorkflowTemplates(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireTenant(w, r); !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, h.Workflows.ListWorkflowTemplates())
+}
+
+func (h *HTTPHandler) startWorkflowTemplate(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := requireTenant(w, r)
+	if !ok {
+		return
+	}
+	if h.Workflows == nil {
+		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
+		return
+	}
+	var input WorkflowTemplateRunInput
+	if !h.decodeJSON(w, r, &input) {
+		return
+	}
+	result, err := h.Workflows.StartWorkflowTemplate(r.Context(), tenantID, r.PathValue("templateID"), input)
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -614,11 +648,11 @@ func (h *HTTPHandler) continueWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusNotImplemented, "workflow", "WORKFLOW_NOT_CONFIGURED", "workflow coordination is not configured")
 		return
 	}
-	var input workflowContinueInput
+	var input WorkflowContinueInput
 	if !h.decodeJSON(w, r, &input) {
 		return
 	}
-	result, err := h.Workflows.ContinueWorkflow(r.Context(), tenantID, r.PathValue("workflowID"), input.Text)
+	result, err := h.Workflows.ContinueWorkflow(r.Context(), tenantID, r.PathValue("workflowID"), input)
 	if err != nil {
 		h.writeError(w, err)
 		return

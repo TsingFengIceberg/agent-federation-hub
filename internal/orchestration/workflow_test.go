@@ -109,6 +109,37 @@ func (workflowAdapter) Subscribe(context.Context, core.Agent, string) iter.Seq2[
 	}
 }
 
+func TestWorkflowArtifactInputProjectsOnlyObservedDependencyParts(t *testing.T) {
+	store, err := core.OpenJournal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTask(context.Background(), core.Task{
+		ID: "source-task", TenantID: "tenant-a", AgentID: "source-agent", State: core.TaskStateCompleted,
+		Artifacts: []core.Artifact{{ID: "report", Complete: true, Parts: []core.Part{
+			{Kind: core.PartText, Text: "summary"}, {Kind: core.PartData, Data: map[string]any{"score": 7}},
+		}}}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, core.Event{Type: "task.completed", State: core.TaskStateCompleted, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := &Coordinator{Service: &hub.Service{Store: store}}
+	workflow := core.Workflow{TenantID: "tenant-a", Steps: []core.WorkflowStep{
+		{ID: "source", TaskID: "source-task", State: core.TaskStateCompleted},
+		{ID: "target", DependsOn: []string{"source"}, ArtifactInputs: []core.WorkflowArtifactInput{{FromStepID: "source", ArtifactID: "report", PartIndex: pointerTo(1)}}, State: core.TaskStateUnknown},
+	}}
+	parts, err := coordinator.projectArtifactInputs(context.Background(), "tenant-a", workflow, workflow.Steps[1])
+	if err != nil || len(parts) != 1 || parts[0].Kind != core.PartData {
+		t.Fatalf("parts=%+v err=%v", parts, err)
+	}
+	workflow.Steps[1].ArtifactInputs[0].ArtifactID = "absent"
+	if _, err := coordinator.projectArtifactInputs(context.Background(), "tenant-a", workflow, workflow.Steps[1]); err == nil {
+		t.Fatal("missing observed Artifact was silently projected")
+	}
+}
+
+func pointerTo(value int) *int { return &value }
+
 func TestWorkflowPersistsPartialFailureAndCompensation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "workflow.journal")
 	store, err := core.OpenJournal(path)
@@ -201,6 +232,12 @@ func TestWorkflowRequiresDurableStore(t *testing.T) {
 	// workflow state; the coordinator rejects it at the boundary.
 	if _, err := (&Coordinator{Service: &hub.Service{Store: taskOnlyStore{Store: store}, Adapter: workflowAdapter{}}}).StartWorkflow(context.Background(), "tenant", WorkflowDefinition{Steps: []StepDefinition{{AgentID: "a", Text: "x"}}}); err == nil {
 		t.Fatal("expected durable workflow store requirement")
+	}
+}
+
+func TestWorkflowAuthRequiredIsWaitingAndResumable(t *testing.T) {
+	if got := workflowStateForSteps([]core.WorkflowStep{{State: core.TaskStateAuthRequired, TaskID: "remote"}}); got != core.WorkflowStateWaitingInput {
+		t.Fatalf("AUTH_REQUIRED workflow state=%s, want WAITING_INPUT", got)
 	}
 }
 

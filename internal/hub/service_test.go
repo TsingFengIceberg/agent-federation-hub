@@ -312,6 +312,39 @@ func TestContinueTaskUsesExistingRemoteTaskAndContext(t *testing.T) {
 	}
 }
 
+func TestContinueTaskAllowsAuthRequiredWithoutCredentialPayload(t *testing.T) {
+	store, _ := core.OpenJournal("")
+	defer store.Close()
+	adapter := &fakeAdapter{
+		descriptor: federation.Descriptor{Name: "auth-agent", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
+		send: func(_ context.Context, _ core.Agent, message federation.Message) iter.Seq2[federation.Observation, error] {
+			if message.RemoteTaskID == "" {
+				return sequence(federation.Observation{DedupKey: "auth-required", Source: "a2a", RemoteTaskID: "remote-auth", RemoteContextID: "context-auth", State: core.TaskStateAuthRequired})
+			}
+			if message.RemoteTaskID != "remote-auth" || message.RemoteContextID != "context-auth" {
+				return sequence(errors.New("AUTH_REQUIRED continuation lost remote correlation"))
+			}
+			return sequence(federation.Observation{DedupKey: "auth-completed", Source: "a2a", RemoteTaskID: "remote-auth", RemoteContextID: "context-auth", State: core.TaskStateCompleted})
+		},
+	}
+	service := newTestService(t, store, adapter)
+	registerTestAgent(t, service, "tenant-a")
+	paused, err := service.SubmitTask(context.Background(), "tenant-a", SubmitTaskInput{AgentID: "agent-1", Text: "requires authorization"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.State != core.TaskStateAuthRequired {
+		t.Fatalf("initial state=%s", paused.State)
+	}
+	completed, err := service.ContinueTask(context.Background(), "tenant-a", paused.ID, ContinueTaskInput{Text: "authorization-approved"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.State != core.TaskStateCompleted || completed.RemoteTaskID != "remote-auth" || completed.RemoteContextID != "context-auth" {
+		t.Fatalf("continued task=%+v", completed)
+	}
+}
+
 func TestRestartRecoveryReconcilesPersistedTask(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.journal")
 	store, err := core.OpenJournal(path)
