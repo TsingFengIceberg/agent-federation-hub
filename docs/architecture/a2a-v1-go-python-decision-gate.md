@@ -74,8 +74,22 @@ before it replaces this baseline.
 
 ### Findings that still require product-level tests
 
-- The Go JSON-RPC and gRPC handlers propagate `A2A-Version` into request context but did not reject the TCK's unsupported `99.0` request. The Hub must verify whether a supported-version interceptor is required or whether this is an SDK gap.
-- `a2a.NewStatusUpdateEvent` uses `time.Now()` without converting to UTC. In the Asia/Shanghai test environment, JSON-RPC emitted a `+08:00` timestamp and failed the current specification's UTC `Z` requirement. This needs a regression contract test independent of host timezone.
+- The pinned Go SDK's execution manager does not classify `AUTH_REQUIRED` as a
+  final state when it releases a local execution slot. A continuation sent in
+  the short hand-off window can therefore receive `task execution is already
+  in progress` even though the remote Task is correctly paused for
+  authorization. The Hub and probe apply a narrowly scoped, bounded retry only
+  when the request already contains a remote `taskId` and the error text is the
+  exact admission error; new Task submissions and unrelated transport errors
+  are never replayed. This is a pinned SDK behavior workaround, not a claim
+  that the SDK natively supports `AUTH_REQUIRED` continuation. The behavior is
+  covered by unit tests and the Go fixture smoke validates the AUTH_REQUIRED
+  state without claiming continuation support for that fixture.
+- The repository-owned JSON-RPC and gRPC TCK SUT now rejects an unsupported
+  `A2A-Version` such as `99.0` through an explicit interceptor, and its fixture
+  status events normalize timestamps to UTC. Cross-SDK and external-provider
+  behavior still needs to be checked before treating those fixes as universal
+  provider requirements.
 - List authorization is deliberately enforced by the Go in-memory task store. The Hub must install an authenticated principal and test tenant/task isolation; bypassing this failure would invalidate the security boundary.
 - Subscription behavior for missing and terminal Tasks, content-type error classification, capability checks, and Push error details need direct contract tests against the current specification rather than inference from the skewed fixture.
 

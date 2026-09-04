@@ -29,8 +29,11 @@ type Extension struct {
 }
 
 type Message struct {
-	ID                string
+	ID string
+	// Text is retained for adapters that have not yet adopted the general Part
+	// contract. New adapters should use Parts as the complete payload.
 	Text              string
+	Parts             []core.Part
 	RemoteTaskID      string
 	RemoteContextID   string
 	ReturnImmediately bool

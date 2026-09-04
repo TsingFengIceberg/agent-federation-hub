@@ -60,15 +60,15 @@ unhealthy until a later refresh succeeds.
 
 | Area | Current executable evidence | Not yet claimed |
 |---|---|---|
-| A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, opt-in HTTP+JSON and gRPC adapter paths, gRPC Bearer metadata regression, signed-card round-trip, URI-based extension admission policy, SDK `v2.5.0`, repository-owned three-Binding TCK SUT, complete pinned-fixture Push CRUD/delivery scenarios, and provider-SDK Push sender/Hub receiver smoke | extension activation semantics, signed/extended Card trust distribution, production authentication, and managed sender/receiver qualification |
+| A2A profile | Machine-checked exact `1.0` JSON-RPC+SSE selection, opt-in HTTP+JSON and gRPC adapter paths, gRPC Bearer metadata regression, signed-card round-trip plus Trust-Bundle-backed admission/revalidation in the local Registry/Gateway smoke, URI-based extension admission policy, SDK `v2.5.0`, repository-owned three-Binding TCK SUT, complete pinned-fixture Push CRUD/delivery scenarios, and provider-SDK Push sender/Hub receiver smoke | extension activation semantics, production Card trust distribution, production authentication, and managed sender/receiver qualification |
 | Durability | Journal append/`fsync`/replay plus PostgreSQL Task/Event/outbox transactions, revisions, schema checksum ledger, two-pool lease tests, Outbox admin replay/retention | Managed database qualification, HA, encrypted backup/PITR, and cross-region replication |
 | Recovery | Known-ID disconnect uses `GetTask`; unknown-ID send becomes ambiguous | Automated ambiguous-operation resolution or exactly-once execution |
-| Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, versioned Trust Bundle reload/rollback checks, detached Trust Bundle signature verification, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, local and central audit retry/outage tests | Production partner IdP/CA/PDP rollout, protected signature-key distribution/KMS operation, consent, and operational SLO qualification |
+| Authentication | Dynamic OIDC/JWKS, JWT validation/revocation, SPIFFE mTLS mapping, versioned Trust Bundle reload/rollback checks, detached Trust Bundle signature verification from local file or authenticated HTTPS source, external HTTPS policy, RFC 8693 exchange, Principal/scope policy, SecretProvider, local and central audit retry/outage tests | Production partner IdP/CA/PDP rollout, protected signature-key distribution/KMS operation, consent, and operational SLO qualification |
 | Tenancy | Authenticated Principal supplies tenant for every management lookup; forged JWT-mode tenant header is ignored | ABAC policy administration, quotas, tenant encryption keys, cross-organization trust federation |
 | Push receiver | Per-Task Bearer hash, constant-time check, task/tenant/size controls, durable idempotent inbox, leased retry/ack, HTTPS/DNS/IP policy, authenticated rate limiting and audit; real Go SDK Push sender smoke covers status and Artifact delivery | Replay timestamp/signature, dead-letter policy, HA ingress load test, and production sender qualification |
 | Artifact | Text, raw bytes, URI, and arbitrary JSON data; append/replace semantics; filesystem/S3 object storage, MIME/size/quota controls, ClamAV quarantine, authenticated retrieval, expiry leases | Encryption policy, DLP/legal hold, backup/restore, production throughput |
 | Errors | Sanitized transport/auth/authz/validation/resource/state/protocol categories | Complete binding-specific status equivalence and tenant policy details |
-| Registry | Durable built-in Agent Card registration by URL, skill selection, explicit Card refresh and health status; HTTPS external Registry publication/import, stale-cache marking, bounded reads, and best-effort periodic sync are covered by a local reference smoke | Nacos/ARD production adapter, Card signature trust distribution, conflict policy, and managed Registry health/SLO qualification |
+| Registry | Durable built-in Agent Card registration by URL, skill selection, explicit Card refresh and health status; HTTPS external Registry publication/import with stable identity idempotency, conflict-safe reference behavior, stale-cache marking, bounded reads, and best-effort periodic sync are covered by a local reference smoke | Nacos/ARD production adapter, Card signature trust distribution, external conflict-policy qualification, and managed Registry health/SLO qualification |
 | Background work | PostgreSQL/journal leases, heartbeats, expiry takeover, bounded retry; immediate A2A acceptance; durable Outbox worker with CloudEvents sink and admin replay/retention; bounded Task priority, Workflow pause/resume/cancel, and process-local worker pause/resume/drain controls | Cross-instance preemption, broker partitioning and managed event-bus operations |
 | Gateway | Direct A2A calls behind the federation Adapter interface; HTTPS external Gateway proxy with CA, optional mTLS client credentials, bounded safe retries, circuit breaking, Bearer configuration, Send/Get/Cancel/Subscribe forwarding, and explicit managed selection are covered by a local reference smoke | Managed agentgateway route, policy authoring, rate limiting, egress controls, and production Gateway SLO qualification |
 | AAMP | AAMP 1.1 lifecycle/result/attachment mapper into the common model | SMTP/JMAP client, discovery, sender policy, pairing, mailbox credentials |
@@ -77,8 +77,12 @@ Remote Agent Card and selected endpoint URLs default to HTTPS and reject literal
 private, loopback, link-local, multicast, and unspecified addresses plus common
 private host suffixes. Local development can explicitly enable private Agent
 URLs. The operator-configured Push callback has the same public HTTPS checks.
-Production deployment still needs DNS resolution and revalidation on every
-connection and redirect to close DNS-rebinding and hostname-based SSRF paths.
+The Hub's production outbound clients now revalidate URL schemes, resolved
+addresses, ports, and redirects at connection time through the shared network
+policy; this closes the corresponding DNS-rebinding and hostname-based SSRF
+path in the repository implementation. Deployment qualification must still
+exercise the policy against real DNS, proxies, IPv6, and managed egress
+controls.
 The Hub is the Push receiver in this slice; the remote Agent performs outbound
 delivery. [`tests/hub/run-push-smoke.sh`](../../tests/hub/run-push-smoke.sh)
 uses the pinned Go SDK's `HTTPPushSender` against the Hub's authenticated

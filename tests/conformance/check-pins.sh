@@ -18,6 +18,10 @@ import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     profile = json.load(handle)
+if profile.get("schemaVersion") != 1:
+    raise SystemExit("profile matrix schemaVersion must be 1")
+if not profile.get("goSDKModule"):
+    raise SystemExit("profile matrix goSDKModule is required")
 for key in ("protocolSourceCommit", "goSDKVersion", "tckCommit", "tckProtocolCommit"):
     print(profile[key])
 PY

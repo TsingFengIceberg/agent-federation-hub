@@ -11,6 +11,7 @@ import (
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/interop"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/netpolicy"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/secrets"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v1"
@@ -62,6 +63,7 @@ func TestAdapterUsesExplicitGRPCProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	allowLocalHTTP(t, adapter)
 	cardURL := "http://" + cardListener.Addr().String() + "/.well-known/agent-card.json"
 	descriptor, err := adapter.Discover(context.Background(), cardURL)
 	if err != nil {
@@ -127,6 +129,7 @@ func TestAdapterGRPCPropagatesDeclaredBearerCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	allowLocalHTTP(t, adapter)
 	cardURL := cardServer.URL + "/.well-known/agent-card.json"
 	if _, err := adapter.Discover(context.Background(), cardURL); err != nil {
 		t.Fatal(err)
@@ -146,4 +149,13 @@ func TestAdapterGRPCPropagatesDeclaredBearerCredential(t *testing.T) {
 	if len(observations) != 1 || observations[0].State != core.TaskStateCompleted {
 		t.Fatalf("observations=%+v", observations)
 	}
+}
+
+func allowLocalHTTP(t *testing.T, adapter *Adapter) {
+	t.Helper()
+	policy := netpolicy.HTTPSBaseURLPolicy()
+	policy.AllowHTTP = true
+	policy.AllowPrivate = true
+	policy.AllowedPorts = nil
+	adapter.SetHTTPClientWithPolicy(&http.Client{Timeout: time.Second}, policy)
 }

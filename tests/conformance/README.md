@@ -29,6 +29,13 @@ A2A_TCK_DIR=/path/to/a2a-tck A2A_TCK_TRANSPORT=grpc A2A_TCK_BINDING=grpc \
 ```
 
 The tested Binding matrix is recorded in [`profile-matrix.json`](profile-matrix.json).
+Each run writes both `owned-sut-result.json` and the raw
+`compatibility-report.json` under its report directory. The runner invokes
+[`verify-tck-result.sh`](verify-tck-result.sh), which checks exact protocol/TCK
+pins, explicit Binding selection, transport failures, and that every non-PASS
+MUST requirement is enumerated. Skipped and not-tested requirements remain
+visible; setting `A2A_TCK_REQUIRE_COMPLETE=1` additionally turns those gaps
+into a deliberate gate failure.
 Repository-owned lifecycle and recovery tests are complementary evidence, not a
 substitute for a future protocol-aligned TCK run.
 
@@ -42,6 +49,16 @@ Run the reproducible three-Binding matrix with a pinned TCK checkout:
 
 ```bash
 A2A_TCK_DIR=/path/to/a2a-tck tests/conformance/run-matrix.sh
+```
+
+To require complete MUST coverage for a selected run (normally a future
+profile-upgrade gate):
+
+```bash
+A2A_TCK_REQUIRE_COMPLETE=1 \
+A2A_TCK_DIR=/path/to/a2a-tck \
+A2A_TCK_TRANSPORT=jsonrpc A2A_TCK_BINDING=jsonrpc \
+tests/conformance/run-tck.sh
 ```
 
 `check-pins.sh` verifies the local A2A source and Go SDK pins and, when a TCK

@@ -279,8 +279,9 @@ func (t tckExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContex
 				return
 			}
 		}
-		// A continuation against INPUT_REQUIRED completes the existing task.
-		if execCtx.StoredTask != nil && execCtx.StoredTask.Status.State == a2a.TaskStateInputRequired {
+		// A continuation against either resumable interruption completes the
+		// existing task while preserving the provider-owned Task/Context IDs.
+		if execCtx.StoredTask != nil && (execCtx.StoredTask.Status.State == a2a.TaskStateInputRequired || execCtx.StoredTask.Status.State == a2a.TaskStateAuthRequired) {
 			_ = emit(a2a.NewArtifactEvent(execCtx, a2a.NewTextPart("continuation complete")))
 			_ = emit(statusEvent(execCtx, a2a.TaskStateCompleted))
 			return
@@ -288,6 +289,8 @@ func (t tckExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContex
 		switch {
 		case strings.HasPrefix(id, "tck-input-required"):
 			_ = emit(statusEvent(execCtx, a2a.TaskStateInputRequired))
+		case strings.HasPrefix(id, "tck-auth-required"):
+			_ = emit(statusEvent(execCtx, a2a.TaskStateAuthRequired))
 		case strings.HasPrefix(id, "tck-reject-task"):
 			_ = emit(statusEvent(execCtx, a2a.TaskStateRejected))
 		case strings.HasPrefix(id, "tck-artifact-text"):

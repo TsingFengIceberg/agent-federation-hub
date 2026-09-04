@@ -7,6 +7,7 @@ import (
 )
 
 type profileMatrix struct {
+	SchemaVersion     int    `json:"schemaVersion"`
 	ProtocolVersion   string        `json:"protocolVersion"`
 	ProtocolSource    string        `json:"protocolSourceCommit"`
 	GoSDKVersion      string        `json:"goSDKVersion"`
@@ -39,6 +40,9 @@ func TestProfileMatrixPinsAndClaims(t *testing.T) {
 	var matrix profileMatrix
 	if err := json.Unmarshal(data, &matrix); err != nil {
 		t.Fatal(err)
+	}
+	if matrix.SchemaVersion != 1 {
+		t.Fatalf("schemaVersion=%d, want 1", matrix.SchemaVersion)
 	}
 	for name, value := range map[string]string{
 		"protocol version": matrix.ProtocolVersion,

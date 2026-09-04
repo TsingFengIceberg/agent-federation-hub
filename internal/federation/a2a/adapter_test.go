@@ -5,13 +5,18 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/core"
 	"github.com/TsingFengIceberg/agent-federation-hub/internal/federation"
+	"github.com/TsingFengIceberg/agent-federation-hub/internal/netpolicy"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 )
@@ -33,6 +38,65 @@ func TestSelectEndpointRequiresExactJSONRPCV1(t *testing.T) {
 				t.Fatalf("error = %v, wantError=%v", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestProtocolVersionsCompareMajorMinorAndIgnorePatch(t *testing.T) {
+	for _, test := range []struct {
+		advertised string
+		required   string
+		want       bool
+	}{
+		{advertised: "1.0", required: "1.0", want: true},
+		{advertised: "1.0.1", required: "1.0", want: true},
+		{advertised: "1.0.99", required: "1.0.2", want: true},
+		{advertised: "1.1", required: "1.0", want: false},
+		{advertised: "2.0.0", required: "1.0", want: false},
+		{advertised: "1", required: "1.0", want: false},
+		{advertised: "1.0.beta", required: "1.0", want: false},
+		{advertised: "01.0", required: "1.0", want: false},
+	} {
+		t.Run(test.advertised+"-"+test.required, func(t *testing.T) {
+			if got := ProtocolVersionsCompatible(test.advertised, test.required); got != test.want {
+				t.Fatalf("ProtocolVersionsCompatible(%q, %q)=%v, want %v", test.advertised, test.required, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalProtocolVersionUsesMajorMinorOnWire(t *testing.T) {
+	for _, test := range []struct {
+		input, want string
+	}{
+		{input: "1.0", want: "1.0"},
+		{input: "1.0.7", want: "1.0"},
+		{input: "2.3.99", want: "2.3"},
+	} {
+		got, err := CanonicalProtocolVersion(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("CanonicalProtocolVersion(%q)=%q err=%v, want %q", test.input, got, err, test.want)
+		}
+	}
+	if _, err := CanonicalProtocolVersion("1"); err == nil {
+		t.Fatal("malformed protocol version was canonicalized")
+	}
+}
+
+func TestBindingProfileRejectsMalformedProtocolVersion(t *testing.T) {
+	profile := InitialBindingProfile
+	profile.ProtocolVersion = "1"
+	if err := profile.Validate(); err == nil {
+		t.Fatal("malformed protocol version was accepted")
+	}
+}
+
+func TestSelectEndpointAcceptsPatchVersion(t *testing.T) {
+	card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{{
+		URL: "https://agent.example", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: "1.0.3",
+	}}}
+	endpoint, _, err := selectEndpointForProfiles(card, []BindingProfile{InitialBindingProfile})
+	if err != nil || endpoint.URL != "https://agent.example" {
+		t.Fatalf("patch-compatible endpoint=%+v err=%v", endpoint, err)
 	}
 }
 
@@ -80,6 +144,31 @@ func TestNewWithProfilesValidatesExplicitContract(t *testing.T) {
 	}
 }
 
+func TestSetHTTPClientWithPolicyCannotBypassUnsafeScheme(t *testing.T) {
+	adapter := New(time.Second)
+	called := false
+	adapter.SetHTTPClientWithPolicy(&http.Client{Transport: a2aRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}, netpolicy.HTTPSOnlyPolicy())
+	request, err := http.NewRequest(http.MethodGet, "http://public.example/.well-known/agent-card.json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.transportClient.Do(request); err == nil {
+		t.Fatal("custom A2A transport bypassed HTTPS policy")
+	}
+	if called {
+		t.Fatal("unsafe A2A request reached custom transport")
+	}
+}
+
+type a2aRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f a2aRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 func TestParseBindingProfiles(t *testing.T) {
 	profiles, err := ParseBindingProfiles("grpc, HTTP+JSON, json_rpc")
 	if err != nil {
@@ -91,6 +180,22 @@ func TestParseBindingProfiles(t *testing.T) {
 	}
 	if _, err := ParseBindingProfiles("smtp"); err == nil {
 		t.Fatal("unsupported profile was accepted")
+	}
+	profiles, err = ParseBindingProfiles("a2a-v1-http-json-sse")
+	if err != nil || len(profiles) != 1 || ProfileName(profiles[0]) != "a2a-v1-http-json-sse" {
+		t.Fatalf("named profile=%+v err=%v", profiles, err)
+	}
+	if _, err := ParseBindingProfiles("JSONRPC,a2a-v1-jsonrpc-sse"); err == nil {
+		t.Fatal("duplicate named profile was accepted")
+	}
+}
+
+func TestKnownBindingProfilesHaveStableNames(t *testing.T) {
+	profiles := KnownBindingProfiles()
+	for _, name := range []string{"a2a-v1-jsonrpc-sse", "a2a-v1-http-json-sse", "a2a-v1-grpc"} {
+		if _, ok := profiles[name]; !ok {
+			t.Fatalf("known profile %q is missing: %+v", name, profiles)
+		}
 	}
 }
 
@@ -149,6 +254,36 @@ func TestAgentCardJWSRoundTripAndTamperDetection(t *testing.T) {
 	card.Name = "tampered"
 	if err := verifier.Verify(context.Background(), card); err == nil {
 		t.Fatal("tampered AgentCard was accepted")
+	}
+}
+
+func TestAdapterRevalidatesAgentCardSignatureAfterAdmission(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := &a2a.AgentCard{
+		Name: "signed", Description: "fixture", Version: "1",
+		SupportedInterfaces: []*a2a.AgentInterface{{
+			URL: "https://agent.example/a2a", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: a2a.Version,
+		}},
+	}
+	if err := SignAgentCard(card, key, "card-key-1"); err != nil {
+		t.Fatal(err)
+	}
+	adapter := New(time.Second)
+	adapter.SetCardVerifier(CardVerifier{Required: true, Resolver: StaticCardSignatureResolver{"card-key-1": &key.PublicKey}})
+	if err := adapter.verifyCard(t.Context(), card); err != nil {
+		t.Fatalf("signed Card admission failed: %v", err)
+	}
+
+	// The same verifier is used by the later outbound client path. A changed
+	// Card must be rejected even though the admission-time Card was valid.
+	card.Name = "tampered after admission"
+	err = adapter.verifyCard(t.Context(), card)
+	var adapterErr *federation.Error
+	if !errors.As(err, &adapterErr) || adapterErr.Problem.Code != "AGENT_CARD_SIGNATURE_INVALID" {
+		t.Fatalf("tampered Card verification result=%v", err)
 	}
 }
 
@@ -216,6 +351,91 @@ func TestMapErrorCategoriesAndSanitizedMessages(t *testing.T) {
 	}
 }
 
+func TestRetryContinuationDoesNotReplayNewTask(t *testing.T) {
+	calls := 0
+	request := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("new"))}
+	_, err := retryContinuation(context.Background(), request, func() (a2a.SendMessageResult, error) {
+		calls++
+		return nil, errors.New("task execution is already in progress")
+	}, 5, 0, 0)
+	if calls != 1 {
+		t.Fatalf("new Task sender called %d times, want 1", calls)
+	}
+	if err == nil || !isExecutionInProgressError(err) {
+		t.Fatalf("error=%v, want original admission error", err)
+	}
+}
+
+func TestRetryContinuationRetriesExactAdmissionErrorForExistingTask(t *testing.T) {
+	calls := 0
+	request := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("continue"))}
+	request.Message.TaskID = "remote-task"
+	wanted := &a2a.Task{}
+	result, err := retryContinuation(context.Background(), request, func() (a2a.SendMessageResult, error) {
+		calls++
+		if calls < 3 {
+			return nil, errors.New("task execution is already in progress")
+		}
+		return wanted, nil
+	}, 5, 0, 0)
+	if err != nil || result != wanted {
+		t.Fatalf("result=%v err=%v, want accepted", result, err)
+	}
+	if calls != 3 {
+		t.Fatalf("existing Task sender called %d times, want 3", calls)
+	}
+}
+
+func TestRetryContinuationStopsAtBoundedAttemptCount(t *testing.T) {
+	calls := 0
+	request := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("continue"))}
+	request.Message.TaskID = "remote-task"
+	_, err := retryContinuation(context.Background(), request, func() (a2a.SendMessageResult, error) {
+		calls++
+		return nil, errors.New("task execution is already in progress")
+	}, 3, 0, 0)
+	if calls != 3 {
+		t.Fatalf("sender called %d times, want bounded 3", calls)
+	}
+	if err == nil || !isExecutionInProgressError(err) {
+		t.Fatalf("error=%v, want final admission error", err)
+	}
+}
+
+func TestRetryContinuationDoesNotRetryUnrelatedTransportError(t *testing.T) {
+	calls := 0
+	request := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("continue"))}
+	request.Message.TaskID = "remote-task"
+	_, err := retryContinuation(context.Background(), request, func() (a2a.SendMessageResult, error) {
+		calls++
+		return nil, errors.New("upstream connection reset")
+	}, 5, 0, 0)
+	if calls != 1 {
+		t.Fatalf("unrelated error caused %d attempts, want 1", calls)
+	}
+	if err == nil || err.Error() != "upstream connection reset" {
+		t.Fatalf("error=%v, want original transport error", err)
+	}
+}
+
+func TestRetryContinuationHonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	request := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("continue"))}
+	request.Message.TaskID = "remote-task"
+	_, err := retryContinuation(ctx, request, func() (a2a.SendMessageResult, error) {
+		calls++
+		return nil, errors.New("task execution is already in progress")
+	}, 5, 0, 0)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v, want context.Canceled", err)
+	}
+	if calls != 0 {
+		t.Fatalf("canceled sender called %d times, want 0", calls)
+	}
+}
+
 func TestDecodePushPreservesStructuredArrayAndStableDedupKey(t *testing.T) {
 	payload := []byte(`{
 		"artifactUpdate": {
@@ -239,5 +459,35 @@ func TestDecodePushPreservesStructuredArrayAndStableDedupKey(t *testing.T) {
 	data, ok := first.Artifacts[0].Artifact.Parts[0].Data.([]any)
 	if !ok || len(data) != 3 {
 		t.Fatalf("structured data = %#v", first.Artifacts[0].Artifact.Parts[0].Data)
+	}
+}
+
+func TestA2APartsFromCorePreservesTypedInputAndRejectsUnresolvedObject(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("report bytes"))
+	parts, err := a2aPartsFromCore([]core.Part{
+		{Kind: core.PartText, Text: "review", MediaType: "text/plain"},
+		{Kind: core.PartData, Data: map[string]any{"priority": "high"}, MediaType: "application/json"},
+		{Kind: core.PartFile, BytesBase64: encoded, MediaType: "application/octet-stream", Filename: "report.bin"},
+		{Kind: core.PartFile, URI: "https://files.example/report.pdf", MediaType: "application/pdf", Filename: "report.pdf"},
+	})
+	if err != nil || len(parts) != 4 {
+		t.Fatalf("parts=%+v err=%v", parts, err)
+	}
+	if value, ok := parts[0].Content.(a2a.Text); !ok || string(value) != "review" {
+		t.Fatalf("text part=%+v", parts[0])
+	}
+	data, dataOK := parts[1].Content.(a2a.Data)
+	dataObject, objectOK := data.Value.(map[string]any)
+	if !dataOK || !objectOK || dataObject["priority"] != "high" {
+		t.Fatalf("data part=%+v", parts[1])
+	}
+	if value, ok := parts[2].Content.(a2a.Raw); !ok || string(value) != "report bytes" || parts[2].Filename != "report.bin" {
+		t.Fatalf("raw part=%+v", parts[2])
+	}
+	if value, ok := parts[3].Content.(a2a.URL); !ok || string(value) != "https://files.example/report.pdf" || parts[3].MediaType != "application/pdf" {
+		t.Fatalf("URL part=%+v", parts[3])
+	}
+	if _, err := a2aPartsFromCore([]core.Part{{Kind: core.PartFile, ObjectID: "tenant-owned-object"}}); err == nil {
+		t.Fatal("unresolved Artifact object reference reached the A2A adapter")
 	}
 }

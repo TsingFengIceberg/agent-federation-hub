@@ -3,8 +3,11 @@ package netpolicy
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,6 +30,36 @@ func TestHTTPSPolicyRejectsPrivateTargetsAndUnsafePorts(t *testing.T) {
 	}
 	if _, err := policy.ValidateURL("https://example.com/file"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateBaseURLRejectsQueryAndFragment(t *testing.T) {
+	policy := HTTPSOnlyPolicy()
+	for _, raw := range []string{"https://registry.example/path?tenant=tenant-a", "https://registry.example/path#fragment"} {
+		if _, err := policy.ValidateBaseURL(raw); err == nil {
+			t.Fatalf("base URL %q was accepted", raw)
+		}
+	}
+	if _, err := policy.ValidateBaseURL("https://registry.example/path"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSameOriginIgnoresPathButChecksAuthority(t *testing.T) {
+	left, err := url.Parse("https://registry.example/bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := url.Parse("https://registry.example/signature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SameOrigin(left, right) {
+		t.Fatal("same HTTPS origin was rejected")
+	}
+	other, _ := url.Parse("https://other.example/signature")
+	if SameOrigin(left, other) {
+		t.Fatal("different HTTPS origin was accepted")
 	}
 }
 
@@ -53,5 +86,39 @@ func TestRedirectPolicyCanDisableRedirects(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodGet, "https://other.example/file", nil)
 	if err := client.CheckRedirect(request, []*http.Request{{}}); !errors.Is(err, http.ErrUseLastResponse) {
 		t.Fatalf("redirect error=%v", err)
+	}
+}
+
+type staticRoundTripper struct{}
+
+func (staticRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusNoContent,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    request,
+	}, nil
+}
+
+func TestWithURLPolicyChecksSchemeEvenForCustomTransport(t *testing.T) {
+	client := WithURLPolicy(&http.Client{Transport: staticRoundTripper{}}, staticResolver{}, HTTPSOnlyPolicy())
+	request, err := http.NewRequest(http.MethodGet, "http://public.example/resource", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(request); err == nil {
+		t.Fatal("custom transport bypassed HTTPS-only policy")
+	}
+}
+
+func TestRestrictedDialContextRejectsPrivateDNSBeforeDial(t *testing.T) {
+	policy := HTTPSOnlyPolicy()
+	client := NewHTTPClient(time.Second, staticResolver{"agent.example": {netip.MustParseAddr("10.0.0.8")}}, policy)
+	request, err := http.NewRequest(http.MethodGet, "https://agent.example/resource", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Do(request)
+	if err == nil || !strings.Contains(err.Error(), "resolved address") {
+		t.Fatalf("private DNS result was not rejected: %v", err)
 	}
 }

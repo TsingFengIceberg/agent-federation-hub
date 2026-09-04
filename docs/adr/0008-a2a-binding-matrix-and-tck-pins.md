@@ -46,6 +46,14 @@ post-executor subscription replay and empty-list array encoding. This wrapper
 is part of the deterministic fixture, not a claim that every provider SDK has
 identical subscription semantics.
 
+The pinned Go SDK also has a known `AUTH_REQUIRED` hand-off behavior: its local
+execution manager may retain an interrupted execution slot briefly, so an
+existing-Task continuation can transiently return `task execution is already in
+progress`. The Hub retries only that exact error for a request carrying a
+remote Task ID, with a bounded attempt count; it never replays a new Task or an
+ambiguous transport error. This compatibility shim is covered by unit tests and
+does not upgrade the SDK's native `AUTH_REQUIRED` continuation semantics.
+
 ## Consequences
 
 - The Hub can reject or route against an explicit profile rather than silently

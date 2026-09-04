@@ -67,6 +67,8 @@
     {"action": "task.reconcile", "method": "POST", "path": "/v1/tasks/{taskID}/reconcile", "scope": "tasks:reconcile"},
     {"action": "workflow.create", "method": "POST", "path": "/v1/workflows", "scope": "workflows:write"},
     {"action": "workflow.list", "method": "GET", "path": "/v1/workflows", "scope": "workflows:read"},
+    {"action": "workflow.list", "method": "GET", "path": "/v1/workflow-templates", "scope": "workflows:read"},
+    {"action": "workflow.create", "method": "POST", "path": "/v1/workflow-templates/{templateID}/runs", "scope": "workflows:write"},
     {"action": "workflow.read", "method": "GET", "path": "/v1/workflows/{workflowID}", "scope": "workflows:read"},
     {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/reconcile", "scope": "workflows:control"},
     {"action": "workflow.control", "method": "POST", "path": "/v1/workflows/{workflowID}/continue", "scope": "workflows:control"},
